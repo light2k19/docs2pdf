@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Development-only tool: rasterises two PDFs and reports per-page differences.
+    It is NOT part of the Docx2Pdf library, which has no external dependencies.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Docx2Pdf.Compare</AssemblyName>
+    <RootNamespace>Docx2Pdf.Compare</RootNamespace>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PDFtoImage" Version="5.0.1" />
+  </ItemGroup>
+
+</Project>

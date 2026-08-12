@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0 is consumable from .NET Framework 4.6.1+, .NET Core 2.0+,
+         .NET 5/6/7/8/9/10, Mono, Xamarin and Unity.  No other TFM is required. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Docx2Pdf</AssemblyName>
+    <RootNamespace>Docx2Pdf</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <SignAssembly>false</SignAssembly>
+    <Deterministic>true</Deterministic>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Docx2Pdf</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Docx2Pdf</Authors>
+    <Description>Dependency-free DOCX to PDF converter for .NET Standard 2.0 (usable from .NET Framework 4.6.1+, .NET Core, .NET 5-10).</Description>
+    <PackageTags>docx;pdf;word;openxml;conversion</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Docx2Pdf.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Docx2Pdf.Tests</AssemblyName>
+    <RootNamespace>Docx2Pdf.Tests</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Docx2Pdf\Docx2Pdf.csproj" />
+  </ItemGroup>
+
+</Project>
