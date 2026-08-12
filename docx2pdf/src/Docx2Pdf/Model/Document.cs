@@ -110,16 +110,28 @@ namespace Docx2Pdf.Model
         /// <summary>Drawn behind the text when set.</summary>
         public bool BehindDoc;
 
+        /// <summary>wp:wrapSquare — body text wraps beside the frame.</summary>
+        public bool WrapSquare;
+        /// <summary>Clearances around the frame (wp:anchor dist* attributes).</summary>
+        public double WrapGapLeftPt, WrapGapRightPt, WrapGapTopPt, WrapGapBottomPt;
+
         /// <summary>Simple preset-geometry shape styling (highlight boxes and the like).</summary>
         public uint? OutlineColor;
         public double OutlineWidthPt = 1;
         public uint? FillColor;
+
+        /// <summary>True when the frame holds w:txbxContent — internal insets apply.</summary>
+        public bool IsTextBox;
+        /// <summary>Text-box internal insets (a:bodyPr lIns/tIns/rIns/bIns; Word defaults).</summary>
+        public double InsetLeftPt = 7.2, InsetTopPt = 3.6, InsetRightPt = 7.2, InsetBottomPt = 3.6;
     }
 
     internal sealed class Paragraph : Block
     {
         public ParagraphFormat Format = new ParagraphFormat();
         public CharacterFormat RunDefaults = new CharacterFormat();
+        /// <summary>Bodies of footnotes referenced in this paragraph (rendered at the page bottom).</summary>
+        public List<List<Block>> FootnoteBodies;
         /// <summary>
         /// Formatting of the paragraph mark (w:pPr/w:rPr). It applies to the pilcrow only —
         /// it sizes empty paragraphs but does not restyle the paragraph's text runs.
@@ -155,6 +167,8 @@ namespace Docx2Pdf.Model
         public double? MarginLeftPt, MarginRightPt, MarginTopPt, MarginBottomPt;
         /// <summary>Text direction btLr / tbRl produce rotated cells; only detected, not rotated.</summary>
         public bool Vertical;
+        /// <summary>w:noWrap — the cell's text never wraps (sample1: "City or Town" header).</summary>
+        public bool NoWrap;
     }
 
     internal sealed class TableRow
@@ -182,6 +196,14 @@ namespace Docx2Pdf.Model
         public double CellMarginTopPt;
         public double CellMarginBottomPt;
         public double CellSpacingPt;
+        /// <summary>Text-anchored floating table (w:tblpPr, vertAnchor "text"): body text wraps beside it.</summary>
+        public bool FloatsInText;
+        /// <summary>The table sits at the column's right edge; text wraps on its left.</summary>
+        public bool FloatAtRight;
+        /// <summary>Horizontal gap between the table and the text beside it.</summary>
+        public double FloatGapSidePt = 9;
+        /// <summary>Vertical gap kept clear below the table (w:bottomFromText).</summary>
+        public double FloatGapBottomPt;
     }
 
     internal sealed class SectionProperties
@@ -251,6 +273,10 @@ namespace Docx2Pdf.Model
         public DocumentInfo Info = new DocumentInfo();
         public bool EvenOddHeaders;
         public double DefaultTabStopPt = 36;
+        /// <summary>w:compatSetting compatibilityMode; documents without one are legacy (12).</summary>
+        public int CompatibilityMode = 12;
+        /// <summary>Style id of the default paragraph style ("Normal").</summary>
+        public string DefaultParagraphStyleId;
         /// <summary>Footnote/endnote bodies keyed by id, rendered at the end of the document.</summary>
         public List<KeyValuePair<string, List<Block>>> Notes = new List<KeyValuePair<string, List<Block>>>();
     }

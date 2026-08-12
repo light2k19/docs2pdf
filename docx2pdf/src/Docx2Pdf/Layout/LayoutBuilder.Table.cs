@@ -38,6 +38,10 @@ namespace Docx2Pdf.Layout
                 tableWidth += w;
 
             var offset = table.IndentPt;
+            // Percent-width tables align their first-cell text with the indent; the
+            // border sits one cell margin further left (see the target computation).
+            if (table.PreferredWidthIsPercent && table.Alignment == TextAlignment.Left && !_inTableCell)
+                offset -= table.CellMarginLeftPt;
             if (table.Alignment == TextAlignment.Center)
             {
                 // A centred table wider than the text column hangs into both margins evenly,
@@ -68,7 +72,9 @@ namespace Docx2Pdf.Layout
                     continue;
 
                 var isLastRow = rowIndex == table.Rows.Count - 1;
-                var source = new TableRowSource(table, row, plans, rowIndex, isLastRow, tableId, extraHeight[rowIndex]);
+                var nextPlans = isLastRow ? null : rowPlans[rowIndex + 1];
+                var source = new TableRowSource(table, row, plans, nextPlans, rowIndex, isLastRow, tableId,
+                                               extraHeight[rowIndex], _ctx.LegacyCellSpacing);
                 var fragment = source.Next(source.NaturalHeight, true);
                 if (fragment == null)
                     continue;
@@ -246,9 +252,23 @@ namespace Docx2Pdf.Layout
             var target = total;
             if (table.PreferredWidthPt.HasValue && table.PreferredWidthPt.Value > 0)
             {
-                target = table.PreferredWidthIsPercent
-                    ? availableWidth * table.PreferredWidthPt.Value / 100.0
-                    : table.PreferredWidthPt.Value;
+                // A percent table with a complete tblGrid renders that grid VERBATIM:
+                // the grid is the column layout Word itself computed for the percent
+                // width when the document was saved (sample1: City 100% = 478.8pt
+                // grid = margin−5.4..margin+5.4; p4 outer 70% = its 335.15pt grid,
+                // NOT 70%+margins; p4 inner 80% = its 130.5pt grid). Without a full
+                // grid, fall back to percent-of-available; the border overhang by the
+                // outer cell margins applies to top-level tables only.
+                if (table.PreferredWidthIsPercent)
+                {
+                    if (!(table.Grid.Count >= maxCells && total > 0))
+                        target = availableWidth * table.PreferredWidthPt.Value / 100.0
+                                 + (_inTableCell ? 0 : table.CellMarginLeftPt + table.CellMarginRightPt);
+                }
+                else
+                {
+                    target = table.PreferredWidthPt.Value;
+                }
             }
             if (target <= 0)
                 target = availableWidth;
@@ -370,8 +390,9 @@ namespace Docx2Pdf.Layout
             private readonly double _marginHeight;
             private bool _first = true;
 
-            public TableRowSource(Table table, TableRow row, List<CellPlan> plans,
-                                  int rowIndex, bool isLastRow, object tableId, double extraHeight)
+            public TableRowSource(Table table, TableRow row, List<CellPlan> plans, List<CellPlan> nextPlans,
+                                  int rowIndex, bool isLastRow, object tableId, double extraHeight,
+                                  bool legacyEmptyRowCollapse)
             {
                 _table = table;
                 _row = row;
@@ -406,6 +427,20 @@ namespace Docx2Pdf.Layout
                     if (bottom != null && bottom.IsVisible)
                         _bottomBorderPt = Math.Max(_bottomBorderPt, bottom.WidthPt);
                 }
+                // The boundary below this row is resolved against the NEXT row's TOP
+                // borders too — a conditional-region border lives on the cells below it
+                // (sample1 College table: the lastRow double sits on the Total row's
+                // cells' Top; Word's Elm row is 24.75pt = 22.5 + that 2.25pt band).
+                if (nextPlans != null)
+                {
+                    foreach (var plan in nextPlans)
+                    {
+                        var top = Pick(plan.Cell.Borders == null ? null : plan.Cell.Borders.Top,
+                                       table.Borders == null ? null : table.Borders.InsideH);
+                        if (top != null && top.IsVisible)
+                            _bottomBorderPt = Math.Max(_bottomBorderPt, top.WidthPt);
+                    }
+                }
 
                 // A cell that starts a vertical merge is measured across the rows it spans,
                 // so it does not force this row to be tall on its own.
@@ -419,7 +454,12 @@ namespace Docx2Pdf.Layout
                 var height = content + _marginHeight;
                 if (row.HeightPt > 0)
                     height = row.HeightExact ? row.HeightPt : Math.Max(height, row.HeightPt);
-                NaturalHeight = Math.Max(8, height + extraHeight + _topBorderPt + _bottomBorderPt);
+                // No minimum floor: Word renders rows at their content height even when
+                // tiny (licence form COM: the sz-8-mark spacer rows measure 4.5pt and
+                // the 8pt-mark row 8.25 — an earlier 8pt floor inflated the former, and
+                // an "empty rows collapse to trHeight" probe broke the latter; both are
+                // simply the MARK LINE heights).
+                NaturalHeight = Math.Max(1, height + extraHeight + _topBorderPt + _bottomBorderPt);
 
                 if (Environment.GetEnvironmentVariable("DOCX2PDF_DEBUG_ROWS") != null)
                 {
@@ -432,8 +472,26 @@ namespace Docx2Pdf.Layout
                             parts.Append(f.Height.ToString("F1")).Append(' ');
                         parts.Append("] ");
                     }
-                    Console.Error.WriteLine("row: trH={0:F1} content={1:F1} margins={2:F1} => {3:F1}  cells: {4}",
-                        row.HeightPt, content, _marginHeight, NaturalHeight, parts);
+                    string label = null;
+                    foreach (var plan in plans)
+                    {
+                        foreach (var block in plan.Cell.Blocks)
+                        {
+                            var para = block as Paragraph;
+                            if (para == null)
+                                continue;
+                            var text = PlainText(para);
+                            if (!string.IsNullOrEmpty(text))
+                            {
+                                label = text.Length > 28 ? text.Substring(0, 28) : text;
+                                break;
+                            }
+                        }
+                        if (label != null)
+                            break;
+                    }
+                    Console.Error.WriteLine("row: trH={0:F1} content={1:F1} margins={2:F1} => {3:F1}  cells: {4} '{5}'",
+                        row.HeightPt, content, _marginHeight, NaturalHeight, parts, label ?? string.Empty);
                 }
             }
 

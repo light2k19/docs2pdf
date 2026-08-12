@@ -23,7 +23,7 @@ namespace Docx2Pdf.Tests
         private static int Main(string[] args)
         {
             _sampleDirectory = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal))
-                               ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "0sample");
+                               ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".sample");
             _sampleDirectory = Path.GetFullPath(_sampleDirectory);
             _outputDirectory = args.Where(a => !a.StartsWith("--", StringComparison.Ordinal)).Skip(1).FirstOrDefault()
                                ?? _sampleDirectory;

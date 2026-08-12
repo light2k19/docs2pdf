@@ -167,6 +167,10 @@ namespace Docx2Pdf.Layout
     internal sealed class Fragment
     {
         public double Height;
+        /// <summary>Portion of Height that is line-spacing leading hanging below the text.
+        /// It does not block a page-bottom fit (Word keeps a line whose text fits even when
+        /// its multiple-leading crosses the bottom margin).</summary>
+        public double BottomSlackPt;
         public List<DrawOp> Ops = new List<DrawOp>();
         /// <summary>Keeps this fragment on the same page as the following one when possible.</summary>
         public bool KeepWithNext;
@@ -183,11 +187,18 @@ namespace Docx2Pdf.Layout
         /// at the top of a page; only spilled-over space-after is dropped there.
         /// </summary>
         public bool IsSpaceBefore;
+        /// <summary>The spacing came from the paragraph's own pPr rather than a style —
+        /// legacy documents dissolve style-derived spacing at page tops even after an
+        /// explicit break, but keep direct spacing.</summary>
+        public bool SpacingIsDirect;
         /// <summary>Heading information used to build the PDF outline.</summary>
         public int HeadingLevel;
         public string HeadingText;
         /// <summary>Repeated at the top of every page a table continues onto.</summary>
         public bool IsTableHeaderRow;
+        /// <summary>Footnote bodies referenced by this fragment; the page that places it
+        /// reserves bottom space and renders them under a separator rule.</summary>
+        public List<Fragment> FootnoteBlocks;
         /// <summary>Identity of the table this fragment belongs to, used to repeat header rows.</summary>
         public object TableId;
         /// <summary>Set on table row fragments that can be split across pages.</summary>

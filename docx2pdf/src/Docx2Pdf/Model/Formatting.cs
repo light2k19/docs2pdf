@@ -87,6 +87,8 @@ namespace Docx2Pdf.Model
         public bool? Hidden;
         /// <summary>Extra inter-character spacing, in points.</summary>
         public double? CharacterSpacingPt;
+        /// <summary>w:position — vertical run offset in points; positive raises, negative lowers.</summary>
+        public double? RaisePt;
 
         public CharacterFormat Clone()
         {
@@ -113,6 +115,7 @@ namespace Docx2Pdf.Model
             if (other.AllCaps.HasValue) AllCaps = other.AllCaps;
             if (other.SmallCaps.HasValue) SmallCaps = other.SmallCaps;
             if (other.Hidden.HasValue) Hidden = other.Hidden;
+            if (other.RaisePt.HasValue) RaisePt = other.RaisePt;
             if (other.CharacterSpacingPt.HasValue) CharacterSpacingPt = other.CharacterSpacingPt;
         }
 
@@ -161,6 +164,13 @@ namespace Docx2Pdf.Model
         /// <summary>HTML "auto" spacing flags (w:beforeAutospacing / w:afterAutospacing).</summary>
         public bool? AutoSpaceBefore;
         public bool? AutoSpaceAfter;
+        /// <summary>w:framePr w:dropCap — this paragraph is a drop cap spanning that many lines.</summary>
+        public int? DropCapLines;
+        /// <summary>True when SpaceBeforePt came from the paragraph's own pPr rather than a style.
+        /// Set by the reader on resolved formats; not merged by ApplyOver.</summary>
+        public bool SpaceBeforeIsDirect;
+        /// <summary>True when SpaceAfterPt came from the paragraph's own pPr rather than a style.</summary>
+        public bool SpaceAfterIsDirect;
 
         public ParagraphFormat Clone()
         {
@@ -191,6 +201,7 @@ namespace Docx2Pdf.Model
             if (other.WidowControl.HasValue) WidowControl = other.WidowControl;
             if (other.AutoSpaceBefore.HasValue) AutoSpaceBefore = other.AutoSpaceBefore;
             if (other.AutoSpaceAfter.HasValue) AutoSpaceAfter = other.AutoSpaceAfter;
+            if (other.DropCapLines.HasValue) DropCapLines = other.DropCapLines;
             if (other.Tabs != null && other.Tabs.Count > 0)
             {
                 // A cleared stop removes the inherited stop at that position; the clear

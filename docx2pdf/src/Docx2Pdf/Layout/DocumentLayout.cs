@@ -16,6 +16,9 @@ namespace Docx2Pdf.Layout
         private LayoutPage _page;
         private SectionProperties _props;
         private double _y;
+        /// <summary>The kept top spacing came from a break RUN (not w:pageBreakBefore) —
+        /// legacy documents dissolve style-derived spacing there.</summary>
+        private bool _topSpacingFromBreakRun;
         /// <summary>Leading spacing is kept at the top of this page (explicit break / section start).</summary>
         private bool _keepTopSpacing;
         private int _pageNumber = 1;
@@ -38,6 +41,10 @@ namespace Docx2Pdf.Layout
         private double _contentTop;
         /// <summary>Height available to body content on the current page.</summary>
         private double _contentHeight;
+        /// <summary>Content height before any footnote reservation on the current page.</summary>
+        private double _contentHeightFull;
+        /// <summary>Footnote bodies to render at the bottom of the current page.</summary>
+        private readonly List<Fragment> _pageNotes = new List<Fragment>();
         private readonly Dictionary<HeaderFooter, double> _headerFooterHeights = new Dictionary<HeaderFooter, double>();
         private LayoutBuilder _measureBuilder;
 
@@ -49,6 +56,8 @@ namespace Docx2Pdf.Layout
         public LayoutResult Layout(WordDocument document)
         {
             _ctx.DefaultTabStopPt = document.DefaultTabStopPt;
+            _ctx.LegacyCellSpacing = document.CompatibilityMode < 15;
+            _ctx.DefaultParagraphStyleId = document.DefaultParagraphStyleId;
             var builder = new LayoutBuilder(_ctx);
 
             for (var sectionIndex = 0; sectionIndex < document.Sections.Count; sectionIndex++)
@@ -60,9 +69,16 @@ namespace Docx2Pdf.Layout
                     _pageNumber = _props.PageNumberStart.Value;
 
                 builder.MaxBlockHeight = Math.Max(48, SmallestContentHeight(_props));
-                var fragments = builder.BuildBlocks(section.Blocks, Math.Max(1, _props.ContentWidthPt));
+                // A multi-column section flows its blocks at column width and composes
+                // them into one balanced side-by-side block (sample3: the continuous
+                // 2-column tail sits at the bottom of Word's last page).
+                var fragments = _props.Columns > 1
+                    ? BuildColumnBlock(builder, section, _props)
+                    : builder.BuildBlocks(section.Blocks, Math.Max(1, _props.ContentWidthPt));
 
-                if (_page == null || sectionIndex > 0)
+                // A continuous section carries on down the same page; only explicit
+                // (nextPage-style) section breaks start a fresh one.
+                if (_page == null || (sectionIndex > 0 && section.StartsNewPage))
                     NewPage(true);
 
                 PlaceAll(fragments);
@@ -73,10 +89,52 @@ namespace Docx2Pdf.Layout
 
             if (_page == null)
                 NewPage(true);
+            FlushPageNotes();
 
             RenderHeadersAndFooters();
             SubstituteFields();
             return _result;
+        }
+
+        /// <summary>
+        /// Flows a multi-column section's blocks at column width and composes them into
+        /// one fragment with the columns side by side, balanced the way Word closes a
+        /// continuous section: fill each column to roughly total/n before moving on.
+        /// </summary>
+        private List<Fragment> BuildColumnBlock(LayoutBuilder builder, Section section, SectionProperties props)
+        {
+            var n = props.Columns;
+            var spacing = props.ColumnSpacingPt;
+            var colWidth = Math.Max(1, (props.ContentWidthPt - (n - 1) * spacing) / n);
+            var parts = builder.BuildBlocks(section.Blocks, colWidth);
+
+            double total = 0;
+            foreach (var part in parts)
+                total += part.Height;
+            var target = total / n;
+
+            var block = new Fragment(0);
+            var column = 0;
+            double y = 0, maxBottom = 0;
+            foreach (var part in parts)
+            {
+                if (column < n - 1 && y > 0 && y + part.Height > target + 0.5)
+                {
+                    column++;
+                    y = 0;
+                }
+                // Spacing dissolves at a column top like at a page top.
+                if (part.IsSpacing && y <= 0)
+                    continue;
+                var dx = column * (colWidth + spacing);
+                foreach (var op in part.Ops)
+                    block.Ops.Add(op.Translate(dx, y));
+                y += part.Height;
+                if (y > maxBottom)
+                    maxBottom = y;
+            }
+            block.Height = maxBottom;
+            return new List<Fragment> { block };
         }
 
         private void PlaceNotes(WordDocument document, LayoutBuilder builder)
@@ -109,9 +167,16 @@ namespace Docx2Pdf.Layout
 
             var breakPending = false;
             object breakSourceId = null;
+            var debugPlace = Environment.GetEnvironmentVariable("DOCX2PDF_DEBUG_PLACE") != null;
             for (var i = 0; i < fragments.Count; i++)
             {
                 var fragment = fragments[i];
+                if (debugPlace)
+                    Console.Error.WriteLine("place pg={0} y={1:F1} h={2:F1} slack={3:F1} cH={4:F1} spc={5}{6} brB={7} keepN={8} row={9} ops={10}",
+                        _result.Pages.Count, _y, fragment.Height, fragment.BottomSlackPt, _contentHeight,
+                        fragment.IsSpacing ? 1 : 0, fragment.IsSpaceBefore ? "b" : "",
+                        fragment.PageBreakBefore ? 1 : 0, fragment.KeepWithNext ? 1 : 0,
+                        fragment.RowSource != null ? 1 : 0, fragment.Ops.Count);
 
                 // The repeated table header must not leak onto a page the table never
                 // reaches: clear the table state as soon as the flow moves past the table,
@@ -135,6 +200,10 @@ namespace Docx2Pdf.Layout
                 {
                     NewPage(false);
                     _keepTopSpacing = true;  // an explicit break keeps the following space-before
+                    // ...except style-derived spacing after a break RUN in legacy docs
+                    // (see the dissolve below). A w:pageBreakBefore paragraph always
+                    // keeps its spacing (sample1's Heading1 chapter tops).
+                    _topSpacingFromBreakRun = breakPending && !fragment.PageBreakBefore;
                 }
                 breakPending = false;
                 breakSourceId = null;
@@ -149,8 +218,14 @@ namespace Docx2Pdf.Layout
                 // Space-before is suppressed at the top of a page reached by natural flow;
                 // it survives after an explicit page break or at a section start (PROBE5:
                 // Word starts the carried paragraph at the content top, license doc keeps
-                // spacing after hard breaks).
-                if (fragment.IsSpacing && fragment.IsSpaceBefore && _y <= 0 && !_keepTopSpacing)
+                // spacing after hard breaks). LEGACY documents dissolve STYLE-derived
+                // spacing after a break RUN (sample3 p2: the pie paragraph starts at the
+                // content top although its Normal style carries before=6pt and p1 ends
+                // with a <w:br type="page"/>) — but a w:pageBreakBefore paragraph keeps
+                // its style spacing (sample1's Heading1 pages sit 24pt down like Word).
+                if (fragment.IsSpacing && fragment.IsSpaceBefore && _y <= 0
+                    && (!_keepTopSpacing
+                        || (_topSpacingFromBreakRun && _ctx.LegacyCellSpacing && !fragment.SpacingIsDirect)))
                     continue;
 
                 var available = _contentHeight - _y;
@@ -193,13 +268,21 @@ namespace Docx2Pdf.Layout
                     continue;
                 }
 
-                if (fragment.Height > _contentHeight - _y + 0.5 && _y > 0)
+                // The fit tolerance is the LARGER of the pixel epsilon and the line's
+                // below-text leading — never their sum (sample4: summing them accepted
+                // a 42nd line on p4 that Word breaks; the text box itself must fit).
+                if (fragment.Height - _contentHeight + _y > Math.Max(0.5, fragment.BottomSlackPt) && _y > 0)
                 {
                     if (blankFromHere[i])
                         return;              // nothing but whitespace is left
 
                     // Widow/orphan control: never strand a single line of a paragraph on either page.
                     var pullBack = WidowOrphanPullBack(fragment);
+                    // A line already at the top of its page is not stranded — pulling it
+                    // would only leave a blank page behind (sample4: a full-page photo
+                    // that opens its page stays put; the next photo-line starts fresh).
+                    if (pullBack >= _placed.Count)
+                        pullBack = 0;
                     var moved = PullBack(pullBack);
                     NewPage(false);
                     foreach (var earlier in moved)
@@ -214,6 +297,14 @@ namespace Docx2Pdf.Layout
                     // landing at the top of the new page (natural flow).
                     if (fragment.IsSpacing && fragment.IsSpaceBefore && _y <= 0 && !_keepTopSpacing)
                         continue;
+
+                    // The reunited chain can still overflow when the following line is
+                    // taller than what the fresh page has left (sample4: an orphan photo
+                    // pulled to its own page, chased by a full-page photo) — the fragment
+                    // then starts yet another page and the pulled lines stay behind,
+                    // exactly like Word's p89 (photo alone) / p90 (full-page photo).
+                    if (fragment.Height - _contentHeight + _y > Math.Max(0.5, fragment.BottomSlackPt) && _y > 0)
+                        NewPage(false);
                 }
 
                 Place(fragment);
@@ -403,6 +494,50 @@ namespace Docx2Pdf.Layout
 
             _y += fragment.Height;
             _placed.Add(record);
+
+            // Footnotes referenced by this fragment claim space at the page bottom:
+            // later fragments on this page see the reduced content height, and the
+            // notes render under a separator when the page finishes.
+            if (fragment.FootnoteBlocks != null)
+            {
+                foreach (var note in fragment.FootnoteBlocks)
+                {
+                    if (_pageNotes.Count == 0)
+                        _contentHeight -= NoteSeparatorHeight;
+                    _pageNotes.Add(note);
+                    _contentHeight -= note.Height;
+                }
+                fragment.FootnoteBlocks = null;
+            }
+        }
+
+        private const double NoteSeparatorHeight = 10;
+
+        /// <summary>Renders the current page's footnotes at its bottom, above the footer.</summary>
+        private void FlushPageNotes()
+        {
+            if (_page == null || _pageNotes.Count == 0)
+                return;
+
+            var height = NoteSeparatorHeight;
+            foreach (var note in _pageNotes)
+                height += note.Height;
+
+            var dx = _props.MarginLeftPt;
+            var y = _contentTop + _contentHeightFull - height;
+            _page.Ops.Add(new LineOp
+            {
+                X1 = dx, Y1 = y + 6, X2 = dx + _props.ContentWidthPt / 3, Y2 = y + 6,
+                Width = 0.5, Color = 0x808080,
+            });
+            y += NoteSeparatorHeight;
+            foreach (var note in _pageNotes)
+            {
+                foreach (var op in note.Ops)
+                    _page.Ops.Add(op.Translate(dx, y));
+                y += note.Height;
+            }
+            _pageNotes.Clear();
         }
 
         /// <summary>Resolves a floating frame's anchor into page coordinates and draws it.</summary>
@@ -564,6 +699,7 @@ namespace Docx2Pdf.Layout
 
         private void NewPage(bool sectionStart)
         {
+            FlushPageNotes();
             if (_ctx.Options.MaxPages > 0 && _result.Pages.Count >= _ctx.Options.MaxPages)
             {
                 _ctx.Warn("The page limit of " + _ctx.Options.MaxPages.ToString(CultureInfo.InvariantCulture)
@@ -587,6 +723,7 @@ namespace Docx2Pdf.Layout
             // Natural flow breaks suppress leading spacing on the new page; explicit page
             // breaks and section starts keep it (the caller marks those).
             _keepTopSpacing = sectionStart;
+            _topSpacingFromBreakRun = false;
 
             // Word grows the body area when the header or footer does not fit inside the margin.
             var headerHeight = MeasureHeaderFooter(SelectHeaderFooter(_props, sectionStart, _page.Number, true), _props, true);
@@ -598,6 +735,7 @@ namespace Docx2Pdf.Layout
             if (footerHeight > 0)
                 contentBottom = Math.Max(contentBottom, _props.FooterDistancePt + footerHeight);
             _contentHeight = Math.Max(24, _props.PageHeightPt - _contentTop - contentBottom);
+            _contentHeightFull = _contentHeight;
 
             DrawPageBorders(sectionStart);
 

@@ -14,6 +14,24 @@ namespace Docx2Pdf.Layout
         /// <summary>True while building the content of a table cell (affects auto spacing).</summary>
         private bool _inTableCell;
 
+        /// <summary>A text-anchored floating table waiting for body text to wrap beside it.</summary>
+        private sealed class PendingFloat
+        {
+            /// <summary>The assembled table drawing; attached to the first wrapped line, then null.</summary>
+            public Fragment Box;
+            /// <summary>Column-relative x where the box is drawn.</summary>
+            public double BoxX;
+            /// <summary>Horizontal space the float takes from the LEFT of wrapped lines.</summary>
+            public double OccupiedPt;
+            /// <summary>Horizontal space taken from the RIGHT (both may be set: sample1 p7
+            /// has arrows floating on both sides of one paragraph).</summary>
+            public double OccupiedRightPt;
+            /// <summary>Vertical extent still to clear before lines regain the full width.</summary>
+            public double RemainingPt;
+        }
+
+        private PendingFloat _pendingFloat;
+
         public LayoutBuilder(LayoutContext context)
         {
             _ctx = context;
@@ -23,14 +41,103 @@ namespace Docx2Pdf.Layout
         {
             var list = blocks as IList<Block> ?? new List<Block>(blocks);
             var fragments = new List<Fragment>();
+
+            // Margin-top anchored square floats sit at the top of the page their anchor
+            // paragraph lands on: attach their exclusion to the nearest preceding hard
+            // page start (a pageBreakBefore paragraph), so the heading and the first
+            // lines wrap beside them the way Word lays out sample1 p7's arrows.
+            Dictionary<int, PendingFloat> pageTopFloats = null;
+            if (!_inTableCell)
+            {
+                for (var i = 0; i < list.Count; i++)
+                {
+                    var scan = list[i] as Paragraph;
+                    if (scan == null)
+                        continue;
+                    foreach (var inline in scan.Inlines)
+                    {
+                        var anchored = inline as AnchoredInline;
+                        if (anchored == null || !anchored.WrapSquare || anchored.WidthPt <= 0)
+                            continue;
+                        if (anchored.VerticalFrom != AnchorRelativeFrom.Margin
+                            || !string.Equals(anchored.VerticalAlign, "top", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        var atRight = string.Equals(anchored.HorizontalAlign, "right", StringComparison.OrdinalIgnoreCase);
+                        var atLeft = string.Equals(anchored.HorizontalAlign, "left", StringComparison.OrdinalIgnoreCase);
+                        if (!atRight && !atLeft)
+                            continue;
+                        // Only the text-side gap narrows the lines; the margin-side gap
+                        // falls outside the column (Word's wrap width measured on p7).
+                        var occupied = anchored.WidthPt + (atRight ? anchored.WrapGapLeftPt : anchored.WrapGapRightPt);
+
+                        var start = i;
+                        for (var j = i; j >= 0; j--)
+                        {
+                            var candidate = list[j] as Paragraph;
+                            if (candidate == null)
+                                continue;
+                            if (candidate.Format != null && candidate.Format.PageBreakBefore == true)
+                            {
+                                start = j;
+                                break;
+                            }
+                        }
+
+                        if (pageTopFloats == null)
+                            pageTopFloats = new Dictionary<int, PendingFloat>();
+                        PendingFloat merged;
+                        if (!pageTopFloats.TryGetValue(start, out merged))
+                        {
+                            merged = new PendingFloat();
+                            pageTopFloats[start] = merged;
+                        }
+                        if (atRight)
+                            merged.OccupiedRightPt = Math.Max(merged.OccupiedRightPt, occupied);
+                        else
+                            merged.OccupiedPt = Math.Max(merged.OccupiedPt, occupied);
+                        merged.RemainingPt = Math.Max(merged.RemainingPt,
+                            anchored.HeightPt + anchored.WrapGapTopPt + anchored.WrapGapBottomPt);
+                    }
+                }
+            }
+
             Paragraph previous = null;
             var previousWasTable = false;
             for (var i = 0; i < list.Count; i++)
             {
+                if (pageTopFloats != null && _pendingFloat == null)
+                {
+                    PendingFloat activated;
+                    if (pageTopFloats.TryGetValue(i, out activated))
+                        _pendingFloat = activated;
+                }
                 var paragraph = list[i] as Paragraph;
                 if (paragraph != null)
                 {
+                    // The empty paragraph Word requires after a nested table takes no
+                    // space when it closes the cell (sample1 p4: the outer row stays at
+                    // its 54pt trHeight — Word draws nothing between the inner table's
+                    // bottom border and the outer one, despite the mark's w:before=240).
+                    if (_inTableCell && _ctx.LegacyCellSpacing && previousWasTable
+                        && i == list.Count - 1 && paragraph.Inlines.Count == 0)
+                        continue;
+
                     var next = i + 1 < list.Count ? list[i + 1] as Paragraph : null;
+
+                    // A drop-cap frame paragraph renders as a float: the big initial sits
+                    // at the column edge and the following paragraph's first lines wrap
+                    // beside it (sample1 p5: "D" + "rop caps are used to emphasize...").
+                    if (paragraph.Format != null && (paragraph.Format.DropCapLines ?? 0) > 0
+                        && !_inTableCell && next != null)
+                    {
+                        var pending = BuildDropCap(paragraph, availableWidth);
+                        if (pending != null)
+                        {
+                            _pendingFloat = pending;
+                            continue;
+                        }
+                    }
+
                     var nextIsTable = i + 1 < list.Count && list[i + 1] is Table;
                     fragments.AddRange(BuildParagraph(paragraph, availableWidth, previous, next,
                                                       previousWasTable, nextIsTable,
@@ -43,12 +150,129 @@ namespace Docx2Pdf.Layout
                 var table = list[i] as Table;
                 if (table != null)
                 {
+                    // A text-anchored floating table renders beside the following
+                    // paragraphs instead of in flow; spacing adjacency skips it the way
+                    // Word does (the float is invisible to the paragraphs around it).
+                    if (table.FloatsInText && !_inTableCell)
+                    {
+                        var pending = BuildFloatingTable(table, availableWidth);
+                        if (pending != null)
+                        {
+                            _pendingFloat = pending;
+                            continue;
+                        }
+                    }
                     fragments.AddRange(BuildTable(table, availableWidth));
                     previous = null;
                     previousWasTable = true;
                 }
             }
+
+            // No text followed the float (or only tables did): return it to the flow so
+            // the table is never lost, and never leak wrap state into later builds.
+            if (!_inTableCell && _pendingFloat != null && _pendingFloat.Box != null)
+            {
+                fragments.Add(_pendingFloat.Box);
+                _pendingFloat = null;
+            }
             return fragments;
+        }
+
+        /// <summary>
+        /// Builds a drop-cap paragraph into a float. Its exact line spacing (Word writes
+        /// w:line ... w:lineRule="exact" sized to the spanned lines) makes the fragment
+        /// itself the frame box, so the following text wraps beside it precisely.
+        /// </summary>
+        private PendingFloat BuildDropCap(Paragraph paragraph, double availableWidth)
+        {
+            var saved = _pendingFloat;
+            _pendingFloat = null;   // the drop cap itself never wraps around anything
+            List<Fragment> built;
+            try
+            {
+                // The initial keeps the paragraph's indents: Word draws the "D" at
+                // Normal's first-line indent, not flush left (verified at zoom).
+                built = BuildParagraph(paragraph, availableWidth, null, null, false, false, false, false);
+            }
+            finally
+            {
+                _pendingFloat = saved;
+            }
+
+            Fragment line = null;
+            foreach (var fragment in built)
+            {
+                if (!fragment.IsSpacing && fragment.Ops.Count > 0)
+                {
+                    line = fragment;
+                    break;
+                }
+            }
+            if (line == null)
+                return null;
+
+            double width = 0;
+            foreach (var op in line.Ops)
+            {
+                var text = op as TextOp;
+                if (text != null)
+                    width = Math.Max(width, text.X + text.Font.Measure(text.Text, text.Size));
+            }
+            if (width <= 0 || width > availableWidth / 2)
+                return null;
+
+            var box = new Fragment(line.Height);
+            box.AddTranslated(line.Ops, 0, 0);
+            return new PendingFloat
+            {
+                Box = box,
+                BoxX = 0,
+                // Word starts the wrapped text ~0.75pt after the initial's advance
+                // (measured on sample1 p5: text at 175px, D right edge 174px @96dpi).
+                OccupiedPt = width + 0.75,
+                RemainingPt = line.Height,
+            };
+        }
+
+        /// <summary>Assembles a floating table into a single overlay box for text to wrap around.</summary>
+        private PendingFloat BuildFloatingTable(Table table, double availableWidth)
+        {
+            var rows = BuildTable(table, availableWidth);
+            if (rows.Count == 0)
+                return null;
+
+            double height = 0;
+            foreach (var row in rows)
+                height += row.Height;
+            double width = 0;
+            foreach (var column in ResolveColumns(table, availableWidth))
+                width += column;
+            if (width <= 0 || width > availableWidth - 24 || height <= 0)
+                return null;      // no room to wrap text beside it: keep it in flow
+
+            var box = new Fragment(height);
+            double y = 0;
+            foreach (var row in rows)
+            {
+                row.RowSource = null;
+                box.AddTranslated(row.Ops, 0, y);
+                y += row.Height;
+            }
+
+            // Word aligns the floated table's first-cell TEXT with the anchor x: the
+            // border sits one cell margin into the page margin (sample1 p3: Word's
+            // ITEM table starts 5.4pt left of the column edge, ours sat flush — the
+            // whole wrapped region was 5.25pt off).
+            var left = table.IndentPt - table.CellMarginLeftPt;
+            var occupied = width + table.FloatGapSidePt + (table.FloatAtRight ? 0 : left);
+            return new PendingFloat
+            {
+                Box = box,
+                BoxX = table.FloatAtRight ? availableWidth - width : left,
+                OccupiedPt = table.FloatAtRight ? 0 : occupied,
+                OccupiedRightPt = table.FloatAtRight ? occupied : 0,
+                RemainingPt = height + table.FloatGapBottomPt,
+            };
         }
 
         // ----------------------------------------------------------------- atoms
@@ -77,6 +301,20 @@ namespace Docx2Pdf.Layout
             public uint? Highlight;
             public double CharSpacing;
             public FieldKind Field;
+
+            /// <summary>Copy with different text, for character-granularity splits.</summary>
+            public TextAtom WithText(string text, double width)
+            {
+                return new TextAtom
+                {
+                    Font = Font, Text = text, Size = Size, Color = Color, Width = width,
+                    Ascent = Ascent, Descent = Descent, LineHeight = LineHeight,
+                    IsSpace = IsSpace, BaselineShift = BaselineShift,
+                    Underline = Underline, UnderlineColor = UnderlineColor,
+                    Strike = Strike, Highlight = Highlight, CharSpacing = CharSpacing,
+                    Field = Field, LinkUrl = LinkUrl, LinkAnchor = LinkAnchor,
+                };
+            }
         }
 
         private sealed class ImageAtom : Atom
@@ -196,7 +434,23 @@ namespace Docx2Pdf.Layout
             // previous contribution did not cover.
             var previousFormat = previous != null ? previous.Format : null;
             var previousAutoAfter = previousFormat != null && previousFormat.AutoSpaceAfter == true;
-            if (format.AutoSpaceBefore == true || previousAutoAfter)
+            // Legacy documents (compatibilityMode < 15) also collapse adjacent spacing
+            // when BOTH sides are STYLE-derived: sample1's TOC measures exactly 6pt
+            // tighter at every after+before boundary (TOC1 after=6 meeting TOC2
+            // before=6 renders 6, not 12), and sample3's Heading↔Normal boundaries
+            // (all spacing from styles) collapse the same way although one side is
+            // the DEFAULT style. DIRECT spacing still ADDS (the Xu resume regressed
+            // 18 ink under an unconditional legacy collapse; its boundaries carry
+            // direct pPr spacing).
+            // A pageBreakBefore paragraph always opens a page — its space-before never
+            // meets the previous after-spacing, so the collapse must not pre-shrink it
+            // (sample1: Heading1 pages sit 24pt down in Word, the collapsed 14pt spacer
+            // pulled every chapter page up).
+            var legacyStyleBoundary = _ctx.LegacyCellSpacing && previous != null
+                && format.PageBreakBefore != true
+                && !format.SpaceBeforeIsDirect
+                && (previousFormat == null || !previousFormat.SpaceAfterIsDirect);
+            if (format.AutoSpaceBefore == true || previousAutoAfter || legacyStyleBoundary)
             {
                 double previousAfter = 0;
                 if (previousFormat != null)
@@ -211,12 +465,96 @@ namespace Docx2Pdf.Layout
                 spaceBefore = Math.Max(0, Math.Max(spaceBefore, previousAfter) - previousAfter);
             }
 
+            // Legacy documents (compatibilityMode < 15) drop STYLE-derived space-before
+            // on a cell paragraph that does not follow another paragraph. Space-before
+            // set directly in the paragraph's own pPr survives (sample1 p4 nested demo:
+            // every cell keeps its direct w:before=240 — One/Two ink 18px below the row
+            // top — while p3's style-spaced College rows sit at bare line height).
+            // Mode-15 documents keep it either way (MyLesen's 3pt cell-top spacers).
+            // The same drop applies to a paragraph directly AFTER a table at body level
+            // (sample3: the heading below each table sits 6pt higher than styled).
+            // A pageBreakBefore paragraph opens a page — its space-before follows the
+            // page-top rules, not the after-table rule (sample1: 'Structural Elements'
+            // follows the p4 calendar table but keeps its 24pt at the top of p5).
+            if ((_inTableCell && previous == null
+                 || previousIsTable && format.PageBreakBefore != true)
+                && _ctx.LegacyCellSpacing && !format.SpaceBeforeIsDirect)
+                spaceBefore = 0;
+
             if (Environment.GetEnvironmentVariable("DOCX2PDF_DEBUG_SPACE") != null && (spaceBefore > 0 || spaceAfter > 0))
             {
                 var probe0 = PlainText(paragraph);
                 Console.Error.WriteLine("space before={0:F1} after={1:F1} autoB={2} autoA={3} num={4} '{5}'",
                     spaceBefore, spaceAfter, format.AutoSpaceBefore, format.AutoSpaceAfter,
                     paragraph.ListNumId ?? "-", probe0.Length > 30 ? probe0.Substring(0, 30) : probe0);
+            }
+
+            // Square-wrapped floating pictures anchored to this paragraph exclude side
+            // strips from its lines (sample1 p7: arrows float at the left and right
+            // margins with the text flowing between them). Their drawing stays with
+            // the anchor op; offset-positioned floats keep the plain overlay behaviour.
+            if (!_inTableCell && _pendingFloat == null)
+            {
+                double floatLeft = 0, floatRight = 0, floatHeight = 0;
+                foreach (var inline in paragraph.Inlines)
+                {
+                    var anchored = inline as AnchoredInline;
+                    if (anchored == null || !anchored.WrapSquare || anchored.WidthPt <= 0)
+                        continue;
+                    // Margin-top anchors are handled at the page-start paragraph by
+                    // BuildBlocks; here only floats that ride with this paragraph.
+                    if (anchored.VerticalFrom == AnchorRelativeFrom.Margin
+                        && string.Equals(anchored.VerticalAlign, "top", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (string.Equals(anchored.HorizontalAlign, "right", StringComparison.OrdinalIgnoreCase))
+                    {
+                        floatRight = Math.Max(floatRight, anchored.WidthPt + anchored.WrapGapLeftPt);
+                    }
+                    else if (string.Equals(anchored.HorizontalAlign, "left", StringComparison.OrdinalIgnoreCase))
+                    {
+                        floatLeft = Math.Max(floatLeft, anchored.WidthPt + anchored.WrapGapRightPt);
+                    }
+                    else if (anchored.HorizontalAlign == null
+                             && (anchored.HorizontalFrom == AnchorRelativeFrom.Column
+                                 || anchored.HorizontalFrom == AnchorRelativeFrom.Margin))
+                    {
+                        // Offset-positioned square anchors wrap by SIDE: a frame hugging
+                        // the left column edge excludes text up to its right edge
+                        // (sample3: the Web Access Symbol at column −4.2pt), and the
+                        // mirror case on the right. Mid-column floats stay overlays
+                        // (both-sides wrap is not modelled).
+                        var frameRight = anchored.HorizontalOffsetPt + anchored.WidthPt;
+                        if (anchored.HorizontalOffsetPt <= availableWidth * 0.25)
+                            floatLeft = Math.Max(floatLeft, frameRight + anchored.WrapGapRightPt);
+                        else if (frameRight >= availableWidth * 0.75)
+                            floatRight = Math.Max(floatRight,
+                                availableWidth - anchored.HorizontalOffsetPt + anchored.WrapGapLeftPt);
+                        else
+                            continue;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                    var floatExtent = anchored.HeightPt + anchored.WrapGapTopPt + anchored.WrapGapBottomPt;
+                    // A negative paragraph-relative offset lifts the frame above its
+                    // anchor line; only the part below the line excludes text (sample3:
+                    // the pie chart at −15.4pt — Word resumes full-width lines 15.4pt
+                    // earlier than the frame height alone would say).
+                    if (anchored.VerticalFrom == AnchorRelativeFrom.Paragraph
+                        && anchored.VerticalAlign == null && anchored.VerticalOffsetPt < 0)
+                        floatExtent += anchored.VerticalOffsetPt;
+                    floatHeight = Math.Max(floatHeight, Math.Max(0, floatExtent));
+                }
+                if (floatLeft > 0 || floatRight > 0)
+                {
+                    _pendingFloat = new PendingFloat
+                    {
+                        OccupiedPt = floatLeft,
+                        OccupiedRightPt = floatRight,
+                        RemainingPt = floatHeight,
+                    };
+                }
             }
 
             var atoms = BuildAtoms(paragraph);
@@ -231,6 +569,7 @@ namespace Docx2Pdf.Layout
                 {
                     IsSpacing = true,
                     IsSpaceBefore = true,
+                    SpacingIsDirect = format.SpaceBeforeIsDirect,
                     PageBreakBefore = format.PageBreakBefore == true,
                     ParagraphId = paragraphId,
                 };
@@ -261,6 +600,13 @@ namespace Docx2Pdf.Layout
                         format.LineSpacing ?? 1.0,
                         probe.Length > 40 ? probe.Substring(0, 40) : probe);
                 }
+                // A line holding only floating anchors takes no flow height: the float
+                // draws at its anchored position and the carrier paragraph collapses
+                // (sample1 p7: the arrows sit in exact-76.8pt empty paragraphs that
+                // occupy no space in Word's flow — the wrapped text starts beside them).
+                if (AnchorOnlyLine(line))
+                    fragment.Height = 0;
+
                 fragment.ParagraphId = paragraphId;
                 fragment.LineIndex = i;
                 fragment.LineCount = lines.Count;
@@ -296,6 +642,68 @@ namespace Docx2Pdf.Layout
             {
                 foreach (var fragment in fragments)
                     fragment.KeepWithNext = true;
+            }
+
+            // Footnotes referenced in this paragraph ride on its first line so the page
+            // that places the line reserves bottom space for them.
+            if (paragraph.FootnoteBodies != null && paragraph.FootnoteBodies.Count > 0 && !_inTableCell)
+            {
+                List<Fragment> notes = null;
+                foreach (var body in paragraph.FootnoteBodies)
+                {
+                    var parts = BuildBlocks(body, availableWidth);
+                    double noteHeight = 0;
+                    foreach (var part in parts)
+                        noteHeight += part.Height;
+                    if (noteHeight <= 0)
+                        continue;
+                    var noteBox = new Fragment(noteHeight);
+                    double noteY = 0;
+                    foreach (var part in parts)
+                    {
+                        noteBox.AddTranslated(part.Ops, 0, noteY);
+                        noteY += part.Height;
+                    }
+                    if (notes == null)
+                        notes = new List<Fragment>();
+                    notes.Add(noteBox);
+                }
+                if (notes != null)
+                {
+                    foreach (var fragment in fragments)
+                    {
+                        if (fragment.IsSpacing)
+                            continue;
+                        fragment.FootnoteBlocks = notes;
+                        break;
+                    }
+                }
+            }
+
+            // A pending floating table draws beside these lines: its box rides on the
+            // first wrapped line's fragment (ops may extend below the fragment box), and
+            // the paragraph's spacers consume float height alongside the lines, which
+            // BreakIntoLines already subtracted.
+            if (_pendingFloat != null && !_inTableCell)
+            {
+                if (_pendingFloat.Box != null)
+                {
+                    foreach (var fragment in fragments)
+                    {
+                        if (fragment.IsSpacing)
+                            continue;
+                        fragment.AddTranslated(_pendingFloat.Box.Ops, _pendingFloat.BoxX, 0);
+                        _pendingFloat.Box = null;
+                        break;
+                    }
+                }
+                foreach (var fragment in fragments)
+                {
+                    if (fragment.IsSpacing)
+                        _pendingFloat.RemainingPt -= fragment.Height;
+                }
+                if (_pendingFloat.RemainingPt <= 0.5 && _pendingFloat.Box == null)
+                    _pendingFloat = null;
             }
 
             return fragments;
@@ -437,8 +845,19 @@ namespace Docx2Pdf.Layout
             }
 
             var width = anchored.WidthPt > 1 ? anchored.WidthPt : 200;
+            // Text boxes lay out inside their internal insets (a:bodyPr; Word defaults
+            // 7.2pt sides, 3.6pt top — the licence QR sits one tIns below the box top).
+            var insetLeft = anchored.IsTextBox ? anchored.InsetLeftPt : 0;
+            var insetTop = anchored.IsTextBox ? anchored.InsetTopPt : 0;
+            if (anchored.IsTextBox)
+                width = Math.Max(12, width - anchored.InsetLeftPt - anchored.InsetRightPt);
             var previousMax = MaxBlockHeight;
             MaxBlockHeight = 100000;              // a frame is never split across pages
+            // The frame's content is built OUT OF FLOW: it must neither consume nor
+            // clear a pending float (the arrow holders ate the very exclusion their
+            // own anchors had just established — sample1 p7).
+            var savedFloat = _pendingFloat;
+            _pendingFloat = null;
             List<Fragment> fragments;
             try
             {
@@ -447,6 +866,7 @@ namespace Docx2Pdf.Layout
             finally
             {
                 MaxBlockHeight = previousMax;
+                _pendingFloat = savedFloat;
             }
 
             var ops = new List<DrawOp>();
@@ -462,7 +882,7 @@ namespace Docx2Pdf.Layout
                 {
                     if (op is BookmarkOp)
                         continue;
-                    ops.Add(op.Translate(0, y));
+                    ops.Add(op.Translate(insetLeft, insetTop + y));
                 }
                 y += fragment.Height;
             }
@@ -582,6 +1002,11 @@ namespace Docx2Pdf.Layout
                 else if (format.VertAlign.Value == VerticalTextAlignment.Subscript)
                     baselineShift = 0.15 * baseSize;
             }
+            // w:position raises (positive) or lowers (negative) the DRAWN glyph without
+            // touching the line's metrics — folding it into ascent/descent cancelled the
+            // shift on exact-height lines (the drop-cap "D" sat 5pt high: the baseline
+            // moved up by the same amount the glyph moved down).
+            var raisePt = format != null && format.RaisePt.HasValue ? format.RaisePt.Value : 0;
 
             foreach (var token in Tokenize(text))
             {
@@ -608,7 +1033,7 @@ namespace Docx2Pdf.Layout
                             Descent = -font.DescentEm * size + baselineShift,
                             LineHeight = font.LineHeightEm * baseSize,
                             IsSpace = isSpace,
-                            BaselineShift = baselineShift,
+                            BaselineShift = baselineShift - raisePt,
                             Underline = format != null && format.Underline.HasValue ? format.Underline.Value : UnderlineStyle.None,
                             UnderlineColor = format != null && format.UnderlineColor.HasValue ? format.UnderlineColor.Value : color,
                             Strike = format != null && format.Strike == true,

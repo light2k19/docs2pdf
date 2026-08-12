@@ -159,19 +159,19 @@ dotnet build docx2pdf\Docx2Pdf.sln -c Release
 
 ## Testing
 
-`0sample\test-docx2pdf.ps1` builds everything, runs the test suite, converts every `.docx`
-in `0sample`, and renders each PDF page to PNG under `0sample\_render`:
+`.sample\test-docx2pdf.ps1` builds everything, runs the test suite, converts every `.docx`
+in `.sample`, and renders each PDF page to PNG under `.sample\_render`:
 
 ```powershell
-.\0sample\test-docx2pdf.ps1
+.\.sample\test-docx2pdf.ps1
 ```
 
 With `-Compare` it additionally exports a reference PDF from Microsoft Word and compares the two
 documents page by page, writing `word` / `ours` / `diff` images and a similarity percentage into
-`0sample\_compare`:
+`.sample\_compare`:
 
 ```powershell
-.\0sample\test-docx2pdf.ps1 -Compare -Dpi 150
+.\.sample\test-docx2pdf.ps1 -Compare -Dpi 150
 ```
 
 The diff image is red where Word puts ink and we do not, and blue where we put ink and Word does
@@ -182,7 +182,7 @@ When Word automation is unavailable, screenshots of the Word pages work just as 
 next to the script as `01.png`, `02.png`, ... and run:
 
 ```powershell
-.\0sample\test-docx2pdf.ps1 -Screenshots showlicenseindocx
+.\.sample\test-docx2pdf.ps1 -Screenshots showlicenseindocx
 ```
 
 Each screenshot is aligned with our page on the page border rectangle, then every text line is

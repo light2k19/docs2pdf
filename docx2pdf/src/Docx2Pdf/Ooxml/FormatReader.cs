@@ -83,6 +83,13 @@ namespace Docx2Pdf.Ooxml
             if (spacingVal.HasValue)
                 f.CharacterSpacingPt = OoxmlUtil.TwipsToPoints(spacingVal.Value);
 
+            // w:position: vertical run offset in half-points (positive raises the
+            // baseline, negative lowers it — sample1's drop-cap "D" is lowered 5pt).
+            var position = rPr.Element(Ns.W + "position");
+            var positionVal = OoxmlUtil.Dbl(position, Ns.W + "val");
+            if (positionVal.HasValue)
+                f.RaisePt = positionVal.Value / 2.0;
+
             return f;
         }
 
@@ -104,6 +111,19 @@ namespace Docx2Pdf.Ooxml
                     case "distribute":
                     case "justify": f.Alignment = TextAlignment.Justify; break;
                     default: f.Alignment = TextAlignment.Left; break;
+                }
+            }
+
+            // A drop-cap frame: the paragraph renders as a large initial spanning
+            // w:lines lines of the following paragraph (other frame kinds are ignored).
+            var framePr = pPr.Element(Ns.W + "framePr");
+            if (framePr != null)
+            {
+                var dropCap = (OoxmlUtil.Str(framePr, Ns.W + "dropCap") ?? "none").ToLowerInvariant();
+                if (dropCap == "drop" || dropCap == "margin")
+                {
+                    var lines = OoxmlUtil.Dbl(framePr, Ns.W + "lines");
+                    f.DropCapLines = lines.HasValue && lines.Value > 0 ? (int)lines.Value : 3;
                 }
             }
 

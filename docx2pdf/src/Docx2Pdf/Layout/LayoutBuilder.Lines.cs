@@ -84,17 +84,41 @@ namespace Docx2Pdf.Layout
             var defaultFont = _ctx.ResolveFont(markFormat);
             var defaultSize = SizeOf(markFormat);
 
+            // Lines beside a pending floating table lose the space it occupies; once the
+            // float's height is consumed, following lines regain the full width (Word
+            // wraps mid-paragraph: sample1 p3 has six narrow lines beside the ITEM
+            // table, then continues full-width below it).
+            var floatState = !_inTableCell ? _pendingFloat : null;
+            var floatRemaining = floatState != null ? floatState.RemainingPt : 0;
+
             Func<bool, Line> newLine = first =>
             {
                 var left = first ? indentLeft + firstLineIndent : indentLeft;
+                var lineRight = right;
+                if (floatState != null && floatRemaining > 0.5)
+                {
+                    left += floatState.OccupiedPt;
+                    if (floatState.OccupiedRightPt > 0)
+                        lineRight = Math.Max(left + 12, right - floatState.OccupiedRightPt);
+                }
                 return new Line
                 {
                     Left = left,
-                    MaxWidth = Math.Max(1, right - left),
+                    MaxWidth = Math.Max(1, lineRight - left),
                     Ascent = 0,
                     Descent = 0,
                     NaturalHeight = 0,
                 };
+            };
+
+            var format0 = paragraph.Format ?? new ParagraphFormat();
+            Action<Line> commit = line =>
+            {
+                lines.Add(line);
+                // Anchor-only lines collapse to zero flow height, so they must not
+                // consume the float's vertical extent either.
+                if (floatState != null && !AnchorOnlyLine(line))
+                    floatRemaining -= LineBoxHeight(format0, line);
             };
 
             var current = newLine(true);
@@ -113,7 +137,7 @@ namespace Docx2Pdf.Layout
                         current.EndsWithBreak = true;
                         current.PageBreakBefore |= pageBreakPending;
                         pageBreakPending = false;
-                        lines.Add(current);
+                        commit(current);
                         current = newLine(false);
                     }
                     else
@@ -124,7 +148,7 @@ namespace Docx2Pdf.Layout
                             current.EndsWithBreak = true;
                             current.PageBreakBefore |= pageBreakPending;
                             pageBreakPending = false;
-                            lines.Add(current);
+                            commit(current);
                             current = newLine(false);
                         }
                         pageBreakPending = true;
@@ -151,7 +175,7 @@ namespace Docx2Pdf.Layout
                             EnsureMetrics(current, defaultFont, defaultSize);
                             current.PageBreakBefore |= pageBreakPending;
                             pageBreakPending = false;
-                            lines.Add(current);
+                            commit(current);
                             current = newLine(false);
                         }
                         continue;
@@ -162,20 +186,35 @@ namespace Docx2Pdf.Layout
                     continue;
                 }
 
-                // Justified text may compress inter-word spaces slightly before wrapping,
-                // the way Word squeezes a last word onto the line.
-                var justified = (paragraph.Format.Alignment ?? TextAlignment.Left) == TextAlignment.Justify;
-                var tolerance = 0.01;
-                if (justified)
-                    tolerance += current.SpaceWidth * 0.20;
-
-                // The candidate lands after any pending spaces, which become internal and
-                // count toward the line. Justified text keeps the ContentWidth basis: its
-                // inter-word spaces compress, which that basis (calibrated with the 20%
-                // tolerance above) models. Left-aligned spaces are rigid — testing without
+                // Justified space compression is a MODE-15 behaviour: Word 2013+'s engine
+                // squeezes inter-word spaces to pull a word up (SaBC, mode 15 — the 20%
+                // model was calibrated there), while the legacy engine breaks rigidly
+                // (sample-6, mode 14: line 1 + "augue" = 487.8pt in a 481.7pt column =
+                // a 15.9%-per-space squeeze Word refuses; rigid fitting took the doc
+                // 75.9 → 99.7). Left-aligned spaces are always rigid — testing without
                 // the pending space admitted an extra word on razor lines (MyLesen p10:
-                // "…Fi Pentadbiran." at 200.6pt kept in a 199.3pt column).
-                var basis = justified ? current.ContentWidth : current.Width;
+                // "…Fi Pentadbiran." 200.6pt kept in a 199.3pt column).
+                var justified = (paragraph.Format.Alignment ?? TextAlignment.Left) == TextAlignment.Justify;
+                // LEGACY Word admits hairline overshoots — sample1 p5's drop-cap line
+                // fits at 0.28pt over our arithmetic (sub-point space advances over ten
+                // spaces) — while rejecting real ones (sample-6: 6.2pt over breaks).
+                // Mode-15 razors cut the other way (a universal 0.4 dropped SaBC 2.6,
+                // MyLesen 0.5): their fit stays at the pixel epsilon, with the
+                // calibrated space-compression model for justified text.
+                var tolerance = _ctx.LegacyCellSpacing ? 0.4 : 0.01;
+                var basis = current.Width;
+                if (justified && !_ctx.LegacyCellSpacing)
+                {
+                    tolerance += current.SpaceWidth * 0.20;
+                    basis = current.ContentWidth;
+                }
+                if (Environment.GetEnvironmentVariable("DOCX2PDF_DEBUG_WRAP") != null)
+                {
+                    var ta = atom as TextAtom;
+                    if (ta != null && !ta.IsSpace && basis + atom.Width > current.MaxWidth + tolerance)
+                        Console.Error.WriteLine("wrap: reject '{0}' w={1:F2} basis={2:F2} max={3:F2} tol={4:F2} left={5:F2}",
+                            ta.Text, atom.Width, basis, current.MaxWidth, tolerance, current.Left);
+                }
                 var fits = basis + atom.Width <= current.MaxWidth + tolerance;
                 if (!fits && current.HasContent && !atom.IsSpace)
                 {
@@ -229,7 +268,7 @@ namespace Docx2Pdf.Layout
                     EnsureMetrics(current, defaultFont, defaultSize);
                     current.PageBreakBefore |= pageBreakPending;
                     pageBreakPending = false;
-                    lines.Add(current);
+                    commit(current);
                     current = newLine(false);
                     if (carried != null)
                     {
@@ -240,6 +279,41 @@ namespace Docx2Pdf.Layout
 
                 if (atom.IsSpace && !current.HasContent && lines.Count > 0 && current.Atoms.Count == 0)
                     continue;      // swallow the space that caused the wrap
+
+                // A single word wider than an EMPTY line wraps at CHARACTER granularity,
+                // the way Word breaks the calendar's "11" into "1"/"1" inside a 10.8pt
+                // day cell (43.2pt column − 10.8 margins − 21.6 first-line indent).
+                if (!atom.IsSpace && !current.HasContent && current.Atoms.Count == 0
+                    && atom.Width > current.MaxWidth - current.Width + tolerance)
+                {
+                    var wide = atom as TextAtom;
+                    if (wide != null && wide.Text != null && wide.Text.Length > 1)
+                    {
+                        var limit = current.MaxWidth - current.Width + tolerance;
+                        var cut = 1;
+                        for (var n = wide.Text.Length - 1; n > 1; n--)
+                        {
+                            if (wide.Font.Measure(wide.Text.Substring(0, n), wide.Size) + wide.CharSpacing * n <= limit)
+                            {
+                                cut = n;
+                                break;
+                            }
+                        }
+                        var headText = wide.Text.Substring(0, cut);
+                        var tailText = wide.Text.Substring(cut);
+                        var headWidth = wide.Font.Measure(headText, wide.Size) + wide.CharSpacing * headText.Length;
+                        var tailWidth = wide.Font.Measure(tailText, wide.Size) + wide.CharSpacing * tailText.Length;
+                        current.Add(wide.WithText(headText, headWidth));
+                        EnsureMetrics(current, defaultFont, defaultSize);
+                        current.PageBreakBefore |= pageBreakPending;
+                        pageBreakPending = false;
+                        commit(current);
+                        current = newLine(false);
+                        atoms[i] = wide.WithText(tailText, tailWidth);
+                        i--;
+                        continue;
+                    }
+                }
 
                 current.Add(atom);
             }
@@ -255,8 +329,49 @@ namespace Docx2Pdf.Layout
             {
                 current.PageBreakBefore |= pageBreakPending;
             }
-            lines.Add(current);
+            commit(current);
+            if (floatState != null)
+                floatState.RemainingPt = Math.Max(0, floatRemaining);
             return lines;
+        }
+
+        /// <summary>True when the line holds only floating anchors (it takes no flow height).</summary>
+        private static bool AnchorOnlyLine(Line line)
+        {
+            var hasAnchor = false;
+            foreach (var atom in line.Atoms)
+            {
+                if (atom is AnchorAtom)
+                    hasAnchor = true;
+                else if (!(atom is BookmarkAtom) && !atom.IsSpace)
+                    return false;
+            }
+            return hasAnchor;
+        }
+
+        /// <summary>
+        /// The box height EmitLine will give this line — used to consume a floating
+        /// table's vertical extent while breaking lines (keep in sync with EmitLine's
+        /// height computation).
+        /// </summary>
+        private static double LineBoxHeight(ParagraphFormat format, Line line)
+        {
+            var natural = line.Ascent + line.Descent;
+            var rule = format.LineSpacingRule ?? LineSpacingRule.Auto;
+            var spacing = format.LineSpacing ?? 1.0;
+            if (rule == LineSpacingRule.Exact && spacing > 0)
+                return spacing;
+            if (rule == LineSpacingRule.AtLeast && spacing > 0)
+                return Math.Max(spacing, Math.Max(line.NaturalHeight, natural));
+            var multiple = spacing <= 0 ? 1.0 : spacing;
+            // A sub-single AUTO multiple compresses below the glyph height (sample3:
+            // w:line=120 spacer paragraphs render 6.7pt in Word, half the font line).
+            var height = multiple < 1
+                ? Math.Max(natural, line.FontHeight) * multiple
+                : Math.Max(natural, line.FontHeight * multiple);
+            if (line.ImageBox > 0)
+                height = Math.Max(height, line.ImageBox + Math.Max(0, multiple - 1) * line.ImageRunFontHeight);
+            return height;
         }
 
         private static void EnsureMetrics(Line line, Fonts.PdfFontBase font, double size)
@@ -373,7 +488,12 @@ namespace Docx2Pdf.Layout
                 // (PROBE11/12: below a 240px image, line=276 adds ~2px, line=360 ~9px,
                 // single spacing nothing; identical amid text; the extra hangs below).
                 var multiple = spacing <= 0 ? 1.0 : spacing;
-                height = Math.Max(natural, line.FontHeight * multiple);
+                // Sub-single AUTO multiples compress below the glyph height (sample3:
+                // w:line=120 spacers render 6.7pt in Word) — keep in sync with
+                // LineBoxHeight.
+                height = multiple < 1
+                    ? Math.Max(natural, line.FontHeight) * multiple
+                    : Math.Max(natural, line.FontHeight * multiple);
                 if (line.ImageBox > 0)
                     height = Math.Max(height,
                         line.ImageBox + Math.Max(0, multiple - 1) * line.ImageRunFontHeight);
@@ -382,11 +502,38 @@ namespace Docx2Pdf.Layout
             if (baseline > height)
                 baseline = height;
 
-            var fragment = new Fragment(height);
+            // Paragraph borders occupy vertical space: the border sits w:space points
+            // away from the text and its stroke width adds to the paragraph height
+            // (sample1 p1: the Title's rule is sz=8 space=4 — Word renders the body
+            // 5pt lower than a space-less border would).
+            var lineBorders = format.Borders;
+            double topExtra = 0, bottomExtra = 0;
+            if (isFirst && borderTop && lineBorders != null && lineBorders.Top != null && lineBorders.Top.IsVisible)
+                topExtra = lineBorders.Top.SpacePt + lineBorders.Top.WidthPt;
+            if (isLast && borderBottom && lineBorders != null && lineBorders.Bottom != null && lineBorders.Bottom.IsVisible)
+                bottomExtra = lineBorders.Bottom.SpacePt + lineBorders.Bottom.WidthPt;
+            baseline += topExtra;
+
+            var fragment = new Fragment(height + topExtra + bottomExtra);
+
+            // The leading an auto line-spacing multiple adds hangs BELOW the ink and
+            // does not block a page-bottom fit: Word places a 42nd line on sample4's
+            // pages where 42 × 14.49pt + spacing overruns the 648pt body by 0.6pt —
+            // the text itself (ascent+descent 13.43) fits, only the 1.06pt of
+            // multiple-leading crosses the margin. The same holds under an inline
+            // picture (sample4 p71: empty line + full-page photo share the page in
+            // Word; our +1.06 pushed the photo off, leaving a blank page). Exact and
+            // AtLeast rules keep their full height.
+            if ((format.LineSpacingRule ?? LineSpacingRule.Auto) == LineSpacingRule.Auto
+                && bottomExtra <= 0)
+            {
+                var inkHeight = Math.Max(Math.Max(line.Ascent + line.Descent, line.NaturalHeight), line.ImageBox);
+                fragment.BottomSlackPt = Math.Max(0, height - inkHeight);
+            }
 
             // Paragraph shading spans the whole content width.
             if (format.Shading.HasValue)
-                fragment.Add(new RectOp { X = 0, Y = 0, Width = availableWidth, Height = height, Color = format.Shading.Value });
+                fragment.Add(new RectOp { X = 0, Y = 0, Width = availableWidth, Height = height + topExtra + bottomExtra, Color = format.Shading.Value });
 
             // Horizontal alignment.
             var alignment = format.Alignment ?? TextAlignment.Left;
@@ -431,7 +578,7 @@ namespace Docx2Pdf.Layout
                 x += width;
             }
 
-            EmitParagraphBorders(fragment, format, availableWidth, height,
+            EmitParagraphBorders(fragment, format, availableWidth, height + topExtra + bottomExtra,
                                  isFirst && borderTop, isLast && borderBottom);
             return fragment;
         }
@@ -699,10 +846,11 @@ namespace Docx2Pdf.Layout
             if (borders == null)
                 return;
 
+            // The strokes sit just inside the space the paragraph reserved for them.
             if (isFirst && borders.Top != null && borders.Top.IsVisible)
-                fragment.Add(HorizontalLine(0, width, 0, borders.Top));
+                fragment.Add(HorizontalLine(0, width, borders.Top.WidthPt / 2, borders.Top));
             if (isLast && borders.Bottom != null && borders.Bottom.IsVisible)
-                fragment.Add(HorizontalLine(0, width, height, borders.Bottom));
+                fragment.Add(HorizontalLine(0, width, height - borders.Bottom.WidthPt / 2, borders.Bottom));
             if (borders.Left != null && borders.Left.IsVisible)
                 fragment.Add(new LineOp
                 {

@@ -65,6 +65,24 @@ namespace Docx2Pdf.Fonts
 
             font = LoadEmbedded(family, bold, italic);
 
+            // Word's own missing-font substitutions, observed from its PDF exports on
+            // this machine (sample2: Helvetica Neue renders in Sylfaen, not the default
+            // sans). Applied only when the requested family is absent.
+            if (font == null)
+            {
+                string wordSubstitute = null;
+                if (string.Equals(family, "Helvetica Neue", StringComparison.OrdinalIgnoreCase))
+                    wordSubstitute = "Sylfaen";
+                else if (string.Equals(family, "Helvetica", StringComparison.OrdinalIgnoreCase))
+                    wordSubstitute = "Arial";
+                if (wordSubstitute != null)
+                {
+                    font = LoadEmbedded(wordSubstitute, bold, italic);
+                    if (font != null)
+                        Warn("Font '" + family + "' is not installed; '" + wordSubstitute + "' was used instead (Word's substitution).");
+                }
+            }
+
             if (font == null && !string.Equals(family, _options.DefaultFontFamily, StringComparison.OrdinalIgnoreCase))
             {
                 font = LoadEmbedded(_options.DefaultFontFamily, bold, italic);

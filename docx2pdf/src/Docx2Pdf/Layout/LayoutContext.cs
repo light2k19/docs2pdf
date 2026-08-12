@@ -13,6 +13,11 @@ namespace Docx2Pdf.Layout
         public readonly ConversionOptions Options;
         public readonly List<string> Warnings;
         public double DefaultTabStopPt = 36;
+        /// <summary>Legacy compatibility mode (&lt; 15): cell paragraphs that do not follow
+        /// another paragraph drop their space-before (sample1's nested-table demo).</summary>
+        public bool LegacyCellSpacing;
+        /// <summary>Style id of the document's default paragraph style ("Normal").</summary>
+        public string DefaultParagraphStyleId;
 
         private readonly Dictionary<string, DecodedImage> _images = new Dictionary<string, DecodedImage>(StringComparer.Ordinal);
         private readonly HashSet<string> _failedImages = new HashSet<string>(StringComparer.Ordinal);

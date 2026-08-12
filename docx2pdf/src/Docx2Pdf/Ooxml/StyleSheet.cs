@@ -17,6 +17,8 @@ namespace Docx2Pdf.Ooxml
         public XElement RPr;
         public XElement TblPr;
         public XElement TcPr;
+        /// <summary>Conditional-region formatting (w:tblStylePr) of a table style.</summary>
+        public List<XElement> TblStylePrs;
         public string NumId;
         public int? NumLevel;
         public int? OutlineLevel;
@@ -84,6 +86,7 @@ namespace Docx2Pdf.Ooxml
                     RPr = el.Element(Ns.W + "rPr"),
                     TblPr = el.Element(Ns.W + "tblPr"),
                     TcPr = el.Element(Ns.W + "tcPr"),
+                    TblStylePrs = el.Elements(Ns.W + "tblStylePr").ToList(),
                 };
                 if (string.IsNullOrEmpty(style.Id))
                     continue;
@@ -242,6 +245,24 @@ namespace Docx2Pdf.Ooxml
             {
                 if (style.TcPr != null)
                     yield return style.TcPr;
+            }
+        }
+
+        /// <summary>
+        /// The w:tblStylePr elements for one conditional region (firstRow, band1Horz, ...)
+        /// across the style chain, root first so derived styles win when applied in order.
+        /// </summary>
+        public IEnumerable<XElement> TableStyleRegions(string styleId, string region)
+        {
+            foreach (var style in Chain(styleId))
+            {
+                if (style.TblStylePrs == null)
+                    continue;
+                foreach (var part in style.TblStylePrs)
+                {
+                    if (string.Equals(OoxmlUtil.Str(part, Ns.W + "type"), region, StringComparison.OrdinalIgnoreCase))
+                        yield return part;
+                }
             }
         }
     }

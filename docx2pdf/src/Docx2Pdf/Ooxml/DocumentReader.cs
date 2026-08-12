@@ -20,6 +20,9 @@ namespace Docx2Pdf.Ooxml
         private NumberingTable _numbering;
         private readonly Dictionary<string, XDocument> _noteParts = new Dictionary<string, XDocument>(StringComparer.Ordinal);
         private readonly List<Block> _pendingBlocks = new List<Block>();
+        /// <summary>Blocks that flow BEFORE the paragraph being read (top-and-bottom
+        /// wrapped pictures push their anchoring paragraph below themselves).</summary>
+        private readonly List<Block> _pendingBlocksBefore = new List<Block>();
         private readonly List<FieldState> _fieldStack = new List<FieldState>();
         /// <summary>
         /// Paragraph and run formatting contributed by the table styles currently in scope.
@@ -28,8 +31,19 @@ namespace Docx2Pdf.Ooxml
         /// </summary>
         private readonly List<KeyValuePair<ParagraphFormat, CharacterFormat>> _tableStyleScope =
             new List<KeyValuePair<ParagraphFormat, CharacterFormat>>();
+        /// <summary>How many tables enclose the paragraph currently being read.</summary>
+        private int _tableDepth;
+        /// <summary>True for documents without compatibilityMode 15+ (legacy layout rules).</summary>
+        private bool _legacyMode = true;
+        /// <summary>w:compatSetting overrideTableStyleFontSizeAndJustification: the default
+        /// paragraph style's font size and justification apply inside tables only when set.</summary>
+        private bool _overrideTableStyleFontSize;
         private string _currentHyperlink;
-        private int _noteCounter;
+        private int _footnoteCounter;
+        private int _endnoteCounter;
+        /// <summary>Marker number format (w:numFmt); Word's defaults when unset.</summary>
+        private string _footnoteNumberFormat = "decimal";
+        private string _endnoteNumberFormat = "lowerRoman";
 
         public StyleSheet Styles { get { return _styles; } }
 
@@ -73,6 +87,7 @@ namespace Docx2Pdf.Ooxml
             var result = new WordDocument();
             ReadSettings(result);
             ReadCoreProperties(result);
+            result.DefaultParagraphStyleId = _styles.DefaultParagraphStyleId;
 
             var footnotes = ReadRelatedXml(Ns.RelFootnotes) ?? ReadFallbackXml("word/footnotes.xml");
             if (footnotes != null)
@@ -97,13 +112,22 @@ namespace Docx2Pdf.Ooxml
                     var sectPr = pPr == null ? null : pPr.Element(Ns.W + "sectPr");
 
                     var paragraph = ReadParagraph(el);
-                    if (paragraph != null)
+                    FlushPendingBefore(section.Blocks);
+                    // In LEGACY documents an EMPTY paragraph that only carries the
+                    // section break takes no vertical space in Word (sample3: the
+                    // 2-column section follows its heading directly, no phantom line).
+                    // Mode-15 documents keep the line (MyLesen's 20 section ends are
+                    // laid out with it — skipping them cost a page of drift).
+                    if (paragraph != null && !(_legacyMode && sectPr != null && paragraph.Inlines.Count == 0))
                         section.Blocks.Add(paragraph);
                     FlushPending(section.Blocks);
 
                     if (sectPr != null)
                     {
                         section.Properties = ReadSectionProperties(sectPr, defaults);
+                        // A sectPr describes how the section it TERMINATES begins.
+                        section.StartsNewPage = !string.Equals(
+                            OoxmlUtil.ChildVal(sectPr, Ns.W + "type"), "continuous", StringComparison.OrdinalIgnoreCase);
                         defaults = section.Properties;
                         result.Sections.Add(section);
                         section = new Section();
@@ -117,6 +141,8 @@ namespace Docx2Pdf.Ooxml
                 else if (el.Name == Ns.W + "sectPr")
                 {
                     section.Properties = ReadSectionProperties(el, defaults);
+                    section.StartsNewPage = !string.Equals(
+                        OoxmlUtil.ChildVal(el, Ns.W + "type"), "continuous", StringComparison.OrdinalIgnoreCase);
                 }
                 else if (el.Name == Ns.W + "sdt")
                 {
@@ -158,6 +184,14 @@ namespace Docx2Pdf.Ooxml
             _pendingBlocks.Clear();
         }
 
+        private void FlushPendingBefore(List<Block> target)
+        {
+            if (_pendingBlocksBefore.Count == 0)
+                return;
+            target.AddRange(_pendingBlocksBefore);
+            _pendingBlocksBefore.Clear();
+        }
+
         private XDocument ReadRelatedXml(string relType)
         {
             var rel = _package.FindRelationshipByType(_documentPart, relType);
@@ -182,6 +216,41 @@ namespace Docx2Pdf.Ooxml
             var val = OoxmlUtil.Dbl(tab, Ns.W + "val");
             if (val.HasValue && val.Value > 0)
                 doc.DefaultTabStopPt = OoxmlUtil.TwipsToPoints(val.Value);
+
+            var compat = settings.Root.Element(Ns.W + "compat");
+            if (compat != null)
+            {
+                foreach (var setting in compat.Elements(Ns.W + "compatSetting"))
+                {
+                    var name = OoxmlUtil.Str(setting, Ns.W + "name");
+                    var value = OoxmlUtil.Str(setting, Ns.W + "val");
+                    if (string.Equals(name, "compatibilityMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int mode;
+                        if (int.TryParse(value, out mode) && mode > 0)
+                        {
+                            doc.CompatibilityMode = mode;
+                            _legacyMode = mode < 15;
+                        }
+                    }
+                    else if (string.Equals(name, "overrideTableStyleFontSizeAndJustification", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _overrideTableStyleFontSize = value == "1"
+                            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+            }
+
+            // Note marker formats; Word defaults to decimal footnotes and
+            // lower-roman endnotes (sample1: "endnotesⁱ" renders as i, not 2).
+            var footnotePr = settings.Root.Element(Ns.W + "footnotePr");
+            var fmt = footnotePr == null ? null : OoxmlUtil.ChildVal(footnotePr, Ns.W + "numFmt");
+            if (!string.IsNullOrEmpty(fmt))
+                _footnoteNumberFormat = fmt;
+            var endnotePr = settings.Root.Element(Ns.W + "endnotePr");
+            fmt = endnotePr == null ? null : OoxmlUtil.ChildVal(endnotePr, Ns.W + "numFmt");
+            if (!string.IsNullOrEmpty(fmt))
+                _endnoteNumberFormat = fmt;
         }
 
         private void ReadCoreProperties(WordDocument doc)
@@ -209,6 +278,7 @@ namespace Docx2Pdf.Ooxml
                 if (el.Name == Ns.W + "p")
                 {
                     var p = ReadParagraph(el);
+                    FlushPendingBefore(blocks);
                     if (p != null)
                         blocks.Add(p);
                     FlushPending(blocks);
@@ -216,6 +286,7 @@ namespace Docx2Pdf.Ooxml
                 else if (el.Name == Ns.W + "tbl")
                 {
                     blocks.Add(ReadTable(el));
+                    FlushPendingBefore(blocks);
                     FlushPending(blocks);
                 }
                 else if (el.Name == Ns.W + "sdt")
@@ -238,15 +309,43 @@ namespace Docx2Pdf.Ooxml
             var format = _styles.DefaultParagraphFormat.Clone();
             var runDefaults = _styles.DefaultCharacterFormat.Clone();
 
-            // Enclosing table styles apply before the paragraph's own style (outermost table first).
+            // The DEFAULT paragraph style's FONT SIZE and JUSTIFICATION apply inside
+            // tables only when compatSetting overrideTableStyleFontSizeAndJustification
+            // is set (Word 2010+ writes val=1). sample1 (no compat settings): cell text
+            // measures 11pt/docDefaults although Normal declares sz 24 — while Normal's
+            // FONT (Ubuntu) and first-line indent are visibly applied in the same cells.
+            // Xu (mode 14) and SaBC (mode 15) carry val=1: Normal applies fully there.
+            var stylePara = _styles.ParagraphFormatFor(p.StyleId);
+            var styleRun = _styles.CharacterFormatFor(p.StyleId);
+            var isDefaultParagraphStyle = string.Equals(p.StyleId, _styles.DefaultParagraphStyleId,
+                                                        StringComparison.OrdinalIgnoreCase);
+            if (isDefaultParagraphStyle && _tableDepth > 0 && !_overrideTableStyleFontSize)
+            {
+                if (stylePara != null && stylePara.Alignment.HasValue)
+                {
+                    stylePara = stylePara.Clone();
+                    stylePara.Alignment = null;
+                }
+                if (styleRun != null && styleRun.SizePt.HasValue)
+                {
+                    styleRun = styleRun.Clone();
+                    styleRun.SizePt = null;
+                }
+            }
+
+            // Enclosing table styles (including conditional-region formatting) apply
+            // BEFORE the paragraph's own style: a NAMED style beats the region (the
+            // Total row's DecimalAligned keeps its 10pt after-spacing although the
+            // lastRow region says 0), while the DEFAULT style's size/justification are
+            // masked above, so region formatting like the calendar title's sz 44 still
+            // shows through Normal.
             foreach (var scope in _tableStyleScope)
             {
                 format.ApplyOver(scope.Key);
                 runDefaults.ApplyOver(scope.Value);
             }
-
-            format.ApplyOver(_styles.ParagraphFormatFor(p.StyleId));
-            runDefaults.ApplyOver(_styles.CharacterFormatFor(p.StyleId));
+            format.ApplyOver(stylePara);
+            runDefaults.ApplyOver(styleRun);
 
             // Numbering, either direct or inherited from the paragraph style.
             string numId = null;
@@ -278,6 +377,15 @@ namespace Docx2Pdf.Ooxml
 
             var directFormat = _fmt.ReadParagraphFormat(pPr);
             format.ApplyOver(directFormat);
+            format.SpaceBeforeIsDirect = directFormat.SpaceBeforePt.HasValue;
+            format.SpaceAfterIsDirect = directFormat.SpaceAfterPt.HasValue;
+
+            // REVERTED 2026-08-13: the "default style's first-line indent does not apply
+            // to right-aligned cell paragraphs" rule was a compensating error from the
+            // pre-grid-verbatim column widths. With correct geometry Word APPLIES the
+            // indent everywhere: the calendar's two-digit day numbers wrap "11"→"1/1"
+            // in the 43.2pt columns (43.2 − 10.8 margins − 21.6 indent ≈ 10.8pt usable)
+            // exactly as our unmodified layout wraps them.
 
             // Direct run properties on the paragraph mark style the pilcrow only: they set the
             // height of an empty paragraph but never restyle the paragraph's text runs.
@@ -448,7 +556,28 @@ namespace Docx2Pdf.Ooxml
             {
                 var rStyle = OoxmlUtil.ChildVal(rPr, Ns.W + "rStyle");
                 if (rStyle != null)
-                    format.ApplyOver(_styles.CharacterFormatFor(rStyle));
+                {
+                    // Word does not render the Hyperlink style's colour/underline inside
+                    // a TOC field's result: the entries carry rStyle Hyperlink for
+                    // navigation, but the TOC styles' plain black text is what prints
+                    // (sample1 p6 — Word's export shows black unadorned entries).
+                    var inTocResult = false;
+                    if (string.Equals(rStyle, "Hyperlink", StringComparison.OrdinalIgnoreCase))
+                    {
+                        for (var i = 0; i < _fieldStack.Count; i++)
+                        {
+                            if (_fieldStack[i].InResult
+                                && _fieldStack[i].Instruction.ToString().TrimStart()
+                                       .StartsWith("TOC", StringComparison.OrdinalIgnoreCase))
+                            {
+                                inTocResult = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!inTocResult)
+                        format.ApplyOver(_styles.CharacterFormatFor(rStyle));
+                }
                 format.ApplyOver(_fmt.ReadRunFormat(rPr));
             }
 
@@ -646,8 +775,19 @@ namespace Docx2Pdf.Ooxml
             if (noteType == "separator" || noteType == "continuationseparator" || noteType == "continuationnotice")
                 return;
 
-            _noteCounter++;
-            var marker = _noteCounter.ToString(CultureInfo.InvariantCulture);
+            // Footnotes and endnotes number independently, each in its own format
+            // (Word defaults: 1 2 3 for footnotes, i ii iii for endnotes).
+            string marker;
+            if (kind == "footnote")
+            {
+                _footnoteCounter++;
+                marker = FormatNoteMarker(_footnoteCounter, _footnoteNumberFormat);
+            }
+            else
+            {
+                _endnoteCounter++;
+                marker = FormatNoteMarker(_endnoteCounter, _endnoteNumberFormat);
+            }
             var markerFormat = format.Clone();
             markerFormat.VertAlign = VerticalTextAlignment.Superscript;
             p.Inlines.Add(new TextInline(marker, markerFormat));
@@ -663,8 +803,58 @@ namespace Docx2Pdf.Ooxml
                     numberFormat.VertAlign = VerticalTextAlignment.Superscript;
                     first.Inlines.Insert(0, new TextInline(marker + " ", numberFormat));
                 }
-                _pendingNotes.Add(new KeyValuePair<string, List<Block>>(marker, blocks));
+                // Footnotes render at the bottom of the page that carries the reference
+                // (sample1 p5); endnotes collect at the end of the document.
+                if (kind == "footnote")
+                {
+                    if (p.FootnoteBodies == null)
+                        p.FootnoteBodies = new List<List<Block>>();
+                    p.FootnoteBodies.Add(blocks);
+                }
+                else
+                {
+                    _pendingNotes.Add(new KeyValuePair<string, List<Block>>(marker, blocks));
+                }
             }
+        }
+
+        /// <summary>Formats a note marker in the given w:numFmt (decimal, roman, letters).</summary>
+        private static string FormatNoteMarker(int number, string format)
+        {
+            switch ((format ?? "decimal").ToLowerInvariant())
+            {
+                case "lowerroman": return RomanNumeral(number).ToLowerInvariant();
+                case "upperroman": return RomanNumeral(number);
+                case "lowerletter": return LetterNumeral(number, 'a');
+                case "upperletter": return LetterNumeral(number, 'A');
+                default: return number.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        private static string RomanNumeral(int number)
+        {
+            if (number <= 0 || number >= 4000)
+                return number.ToString(CultureInfo.InvariantCulture);
+            var values = new[] { 1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1 };
+            var digits = new[] { "M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I" };
+            var sb = new StringBuilder();
+            for (var i = 0; i < values.Length; i++)
+            {
+                while (number >= values[i])
+                {
+                    sb.Append(digits[i]);
+                    number -= values[i];
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static string LetterNumeral(int number, char baseChar)
+        {
+            // a..z, aa..zz, ... (Word repeats the letter past 26).
+            var index = (number - 1) % 26;
+            var repeat = (number - 1) / 26 + 1;
+            return new string((char)(baseChar + index), repeat);
         }
 
         private readonly List<KeyValuePair<string, List<Block>>> _pendingNotes = new List<KeyValuePair<string, List<Block>>>();
@@ -947,6 +1137,11 @@ namespace Docx2Pdf.Ooxml
                 HeightPt = heightPt,
                 Format = format,
                 BehindDoc = OoxmlUtil.Str(anchor, "behindDoc") == "1",
+                WrapSquare = anchor.Element(Ns.Wp + "wrapSquare") != null,
+                WrapGapLeftPt = OoxmlUtil.EmuToPoints(OoxmlUtil.Dbl(anchor, "distL") ?? 0),
+                WrapGapRightPt = OoxmlUtil.EmuToPoints(OoxmlUtil.Dbl(anchor, "distR") ?? 0),
+                WrapGapTopPt = OoxmlUtil.EmuToPoints(OoxmlUtil.Dbl(anchor, "distT") ?? 0),
+                WrapGapBottomPt = OoxmlUtil.EmuToPoints(OoxmlUtil.Dbl(anchor, "distB") ?? 0),
             };
 
             var positionH = anchor.Element(Ns.Wp + "positionH");
@@ -991,6 +1186,22 @@ namespace Docx2Pdf.Ooxml
             if (textBox != null)
             {
                 frame.Blocks = ReadBlocks(textBox);
+                // Text boxes lay their content out inside internal insets (a:bodyPr,
+                // Word defaults 7.2pt sides / 3.6pt top+bottom — the MPOB licence QR
+                // sits one tIns lower than a naive box-origin layout).
+                frame.IsTextBox = true;
+                var bodyPr = anchor.Descendants(Ns.A + "bodyPr").FirstOrDefault();
+                if (bodyPr != null)
+                {
+                    var l = OoxmlUtil.Dbl(bodyPr, "lIns");
+                    var t = OoxmlUtil.Dbl(bodyPr, "tIns");
+                    var r = OoxmlUtil.Dbl(bodyPr, "rIns");
+                    var b = OoxmlUtil.Dbl(bodyPr, "bIns");
+                    if (l.HasValue) frame.InsetLeftPt = OoxmlUtil.EmuToPoints(l.Value);
+                    if (t.HasValue) frame.InsetTopPt = OoxmlUtil.EmuToPoints(t.Value);
+                    if (r.HasValue) frame.InsetRightPt = OoxmlUtil.EmuToPoints(r.Value);
+                    if (b.HasValue) frame.InsetBottomPt = OoxmlUtil.EmuToPoints(b.Value);
+                }
             }
             else
             {
@@ -1019,6 +1230,33 @@ namespace Docx2Pdf.Ooxml
                 if (image == null)
                     return;
                 ReadCrop(anchor, image);
+
+                // A top-and-bottom wrapped picture interrupts the text instead of
+                // overlaying it: it flows as its own (usually centred) block after the
+                // anchoring paragraph (sample1 p7's green dot between two paragraphs).
+                if (anchor.Element(Ns.Wp + "wrapTopAndBottom") != null)
+                {
+                    var block = new Paragraph
+                    {
+                        Format = _styles.DefaultParagraphFormat.Clone(),
+                        RunDefaults = _styles.DefaultCharacterFormat.Clone(),
+                    };
+                    block.Format.SpaceBeforePt = 0;
+                    block.Format.SpaceAfterPt = 0;
+                    block.Format.IndentLeftPt = 0;
+                    block.Format.IndentRightPt = 0;
+                    block.Format.IndentFirstLinePt = 0;
+                    if (string.Equals(frame.HorizontalAlign, "center", StringComparison.OrdinalIgnoreCase))
+                        block.Format.Alignment = TextAlignment.Center;
+                    else if (string.Equals(frame.HorizontalAlign, "right", StringComparison.OrdinalIgnoreCase))
+                        block.Format.Alignment = TextAlignment.Right;
+                    block.Inlines.Add(image);
+                    // The picture interrupts the text ABOVE its anchoring paragraph:
+                    // Word pushes the paragraph below the image (sample1: the dot sits
+                    // before "Centered images like this...", its anchor paragraph).
+                    _pendingBlocksBefore.Add(block);
+                    return;
+                }
 
                 var holder = new Paragraph
                 {
@@ -1287,17 +1525,50 @@ namespace Docx2Pdf.Ooxml
                 scoped = true;
             }
 
+            // tblLook: which conditional regions of the table style are switched on.
+            // Older writers omit the per-row/cell w:cnfStyle stamps, so the regions are
+            // derived from position + these flags (sample1's calendar Quick Table).
+            var look = ReadTableLook(tblPr);
+            int rowBandSize = 1, colBandSize = 1;
+            if (styleId != null)
+            {
+                foreach (var stylePr in _styles.TableStyleProperties(styleId))
+                {
+                    var rb = OoxmlUtil.ChildVal(stylePr, Ns.W + "tblStyleRowBandSize");
+                    int n;
+                    if (rb != null && int.TryParse(rb, out n) && n > 0) rowBandSize = n;
+                    var cb = OoxmlUtil.ChildVal(stylePr, Ns.W + "tblStyleColBandSize");
+                    if (cb != null && int.TryParse(cb, out n) && n > 0) colBandSize = n;
+                }
+            }
+
+            var rowEls = new List<XElement>();
+            foreach (var rowEl in OoxmlUtil.EffectiveElements(el))
+            {
+                if (rowEl.Name == Ns.W + "tr")
+                    rowEls.Add(rowEl);
+            }
+
+            _tableDepth++;
             try
             {
-                foreach (var rowEl in OoxmlUtil.EffectiveElements(el))
+                for (var r = 0; r < rowEls.Count; r++)
                 {
-                    if (rowEl.Name != Ns.W + "tr")
-                        continue;
-                    table.Rows.Add(ReadRow(rowEl, table, styleCellBorders));
+                    var position = new TablePosition
+                    {
+                        Look = look,
+                        RowIndex = r,
+                        RowCount = rowEls.Count,
+                        GridCount = table.Grid.Count,
+                        RowBandSize = rowBandSize,
+                        ColBandSize = colBandSize,
+                    };
+                    table.Rows.Add(ReadRow(rowEls[r], table, styleCellBorders, styleId, position));
                 }
             }
             finally
             {
+                _tableDepth--;
                 if (scoped)
                     _tableStyleScope.RemoveAt(_tableStyleScope.Count - 1);
             }
@@ -1366,6 +1637,29 @@ namespace Docx2Pdf.Ooxml
             if (indW.HasValue)
                 table.IndentPt = OoxmlUtil.TwipsToPoints(indW.Value);
 
+            // A text-anchored positioned table floats beside the body text (sample1 p3:
+            // the ITEM/NEEDED table with paragraphs wrapping to its right). Page- and
+            // margin-anchored tables, or ones pushed well away from the anchor, still
+            // render in flow — absolute table positioning is not modelled.
+            var tblp = tblPr.Element(Ns.W + "tblpPr");
+            if (tblp != null)
+            {
+                var vAnchor = (OoxmlUtil.Str(tblp, Ns.W + "vertAnchor") ?? "text").ToLowerInvariant();
+                var tblpY = OoxmlUtil.Dbl(tblp, Ns.W + "tblpY") ?? 0;
+                if (vAnchor == "text" && Math.Abs(tblpY) < 200)
+                {
+                    table.FloatsInText = true;
+                    var xSpec = (OoxmlUtil.Str(tblp, Ns.W + "tblpXSpec") ?? "left").ToLowerInvariant();
+                    table.FloatAtRight = xSpec == "right" || xSpec == "outside";
+                    var side = OoxmlUtil.Dbl(tblp, Ns.W + (table.FloatAtRight ? "leftFromText" : "rightFromText"));
+                    if (side.HasValue)
+                        table.FloatGapSidePt = OoxmlUtil.TwipsToPoints(side.Value);
+                    var bottom = OoxmlUtil.Dbl(tblp, Ns.W + "bottomFromText");
+                    if (bottom.HasValue)
+                        table.FloatGapBottomPt = OoxmlUtil.TwipsToPoints(bottom.Value);
+                }
+            }
+
             var margins = tblPr.Element(Ns.W + "tblCellMar");
             if (margins != null)
             {
@@ -1397,10 +1691,105 @@ namespace Docx2Pdf.Ooxml
             return type == "dxa" ? OoxmlUtil.TwipsToPoints(w.Value) : w.Value;
         }
 
-        private TableRow ReadRow(XElement rowEl, Table table, Borders styleCellBorders)
+        /// <summary>Which conditional regions of a table style are enabled (w:tblLook).</summary>
+        private sealed class TableLook
+        {
+            public bool FirstRow, LastRow, FirstColumn, LastColumn, HBand, VBand;
+        }
+
+        /// <summary>Where the row/cell being read sits, for deriving conditional regions.</summary>
+        private sealed class TablePosition
+        {
+            public TableLook Look;
+            public int RowIndex, RowCount, GridCount;
+            public int RowBandSize = 1, ColBandSize = 1;
+            /// <summary>Grid column the next cell starts at; advanced by ReadRow.</summary>
+            public int ColumnCursor;
+        }
+
+        private static TableLook ReadTableLook(XElement tblPr)
+        {
+            var look = new TableLook();
+            var el = tblPr == null ? null : tblPr.Element(Ns.W + "tblLook");
+            if (el == null)
+            {
+                look.HBand = look.VBand = true;
+                return look;
+            }
+
+            var val = OoxmlUtil.Str(el, Ns.W + "val");
+            int bits;
+            if (val != null && int.TryParse(val, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out bits))
+            {
+                look.FirstRow = (bits & 0x20) != 0;
+                look.LastRow = (bits & 0x40) != 0;
+                look.FirstColumn = (bits & 0x80) != 0;
+                look.LastColumn = (bits & 0x100) != 0;
+                look.HBand = (bits & 0x200) == 0;
+                look.VBand = (bits & 0x400) == 0;
+            }
+
+            // Newer writers use attributes instead of (or alongside) the hex value.
+            Func<string, bool?> flag = name =>
+            {
+                var v = OoxmlUtil.Str(el, Ns.W + name);
+                if (v == null) return null;
+                return v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase);
+            };
+            var b = flag("firstRow"); if (b.HasValue) look.FirstRow = b.Value;
+            b = flag("lastRow"); if (b.HasValue) look.LastRow = b.Value;
+            b = flag("firstColumn"); if (b.HasValue) look.FirstColumn = b.Value;
+            b = flag("lastColumn"); if (b.HasValue) look.LastColumn = b.Value;
+            b = flag("noHBand"); if (b.HasValue) look.HBand = !b.Value;
+            b = flag("noVBand"); if (b.HasValue) look.VBand = !b.Value;
+            return look;
+        }
+
+        /// <summary>Row-level cnfStyle bits derived from position when the writer omitted them.</summary>
+        private static string SynthesizeRowMask(TablePosition pos)
+        {
+            var bits = "000000000000".ToCharArray();
+            var look = pos.Look;
+            var first = look.FirstRow && pos.RowIndex == 0;
+            var last = look.LastRow && pos.RowIndex == pos.RowCount - 1;
+            if (first) bits[0] = '1';
+            if (last) bits[1] = '1';
+            if (look.HBand && !first && !last)
+            {
+                var index = pos.RowIndex - (look.FirstRow ? 1 : 0);
+                if (index >= 0)
+                    bits[(index / pos.RowBandSize) % 2 == 0 ? 6 : 7] = '1';
+            }
+            return new string(bits);
+        }
+
+        /// <summary>Cell-level cnfStyle bits derived from the column position.</summary>
+        private static string SynthesizeCellMask(TablePosition pos, int span)
+        {
+            var bits = "000000000000".ToCharArray();
+            var look = pos.Look;
+            var col = pos.ColumnCursor;
+            var first = look.FirstColumn && col == 0;
+            var last = look.LastColumn && pos.GridCount > 0 && col + span >= pos.GridCount;
+            if (first) bits[2] = '1';
+            if (last) bits[3] = '1';
+            if (look.VBand && !first && !last)
+            {
+                var index = col - (look.FirstColumn ? 1 : 0);
+                if (index >= 0)
+                    bits[(index / pos.ColBandSize) % 2 == 0 ? 4 : 5] = '1';
+            }
+            return new string(bits);
+        }
+
+        private TableRow ReadRow(XElement rowEl, Table table, Borders styleCellBorders, string tableStyleId,
+                                 TablePosition position)
         {
             var row = new TableRow();
             var trPr = rowEl.Element(Ns.W + "trPr");
+            var rowCnf = trPr == null ? null : OoxmlUtil.ChildVal(trPr, Ns.W + "cnfStyle");
+            if (rowCnf == null && position != null && tableStyleId != null)
+                rowCnf = SynthesizeRowMask(position);
             if (trPr != null)
             {
                 row.IsHeader = OoxmlUtil.Toggle(trPr, Ns.W + "tblHeader") == true;
@@ -1430,7 +1819,9 @@ namespace Docx2Pdf.Ooxml
             {
                 if (cellEl.Name != Ns.W + "tc")
                     continue;
-                var cell = ReadCell(cellEl, table, styleCellBorders);
+                var cell = ReadCell(cellEl, table, styleCellBorders, tableStyleId, rowCnf, position);
+                if (position != null)
+                    position.ColumnCursor += Math.Max(1, cell.GridSpan);
 
                 // Legacy horizontal merge (w:hMerge): a continued cell folds into the cell
                 // it continues, widening that cell's span — the MPOB licence uses this for
@@ -1452,12 +1843,70 @@ namespace Docx2Pdf.Ooxml
             return row;
         }
 
-        private TableCell ReadCell(XElement cellEl, Table table, Borders styleCellBorders)
+        private TableCell ReadCell(XElement cellEl, Table table, Borders styleCellBorders,
+                                   string tableStyleId, string rowCnf, TablePosition position)
         {
             var cell = new TableCell();
             var tcPr = cellEl.Element(Ns.W + "tcPr");
             if (styleCellBorders != null)
                 cell.Borders = styleCellBorders.Clone();
+
+            // Table-style conditional regions (header row shading, banded rows, first
+            // column bold, ...). Word stamps each row/cell with a w:cnfStyle bitmask
+            // that already resolves banding and tblLook, so the mask is authoritative
+            // (sample1: "Notice how the formatting for the header row and sub header
+            // rows is preserved"). Applied before direct tcPr so direct wins.
+            CharacterFormat regionRun = null;
+            ParagraphFormat regionPara = null;
+            if (tableStyleId != null)
+            {
+                var cellCnf = tcPr == null ? null : OoxmlUtil.ChildVal(tcPr, Ns.W + "cnfStyle");
+                if (cellCnf == null && position != null)
+                {
+                    var spanText = tcPr == null ? null : OoxmlUtil.ChildVal(tcPr, Ns.W + "gridSpan");
+                    int span;
+                    if (spanText == null || !int.TryParse(spanText, out span) || span < 1)
+                        span = 1;
+                    cellCnf = SynthesizeCellMask(position, span);
+                }
+                foreach (var region in ActiveRegions(rowCnf, cellCnf))
+                {
+                    foreach (var part in _styles.TableStyleRegions(tableStyleId, region))
+                    {
+                        var partTc = part.Element(Ns.W + "tcPr");
+                        if (partTc != null)
+                        {
+                            var partShd = partTc.Element(Ns.W + "shd");
+                            if (partShd != null)
+                                cell.Shading = FormatReader.ReadShadingFill(partShd);
+                            var partBorders = FormatReader.ReadBorders(partTc.Element(Ns.W + "tcBorders"));
+                            if (partBorders != null)
+                            {
+                                if (cell.Borders == null)
+                                    cell.Borders = new Borders();
+                                if (partBorders.Top != null) cell.Borders.Top = partBorders.Top;
+                                if (partBorders.Bottom != null) cell.Borders.Bottom = partBorders.Bottom;
+                                if (partBorders.Left != null) cell.Borders.Left = partBorders.Left;
+                                if (partBorders.Right != null) cell.Borders.Right = partBorders.Right;
+                            }
+                        }
+                        var partR = part.Element(Ns.W + "rPr");
+                        if (partR != null)
+                        {
+                            if (regionRun == null)
+                                regionRun = new CharacterFormat();
+                            regionRun.ApplyOver(_fmt.ReadRunFormat(partR));
+                        }
+                        var partP = part.Element(Ns.W + "pPr");
+                        if (partP != null)
+                        {
+                            if (regionPara == null)
+                                regionPara = new ParagraphFormat();
+                            regionPara.ApplyOver(_fmt.ReadParagraphFormat(partP));
+                        }
+                    }
+                }
+            }
 
             if (tcPr != null)
             {
@@ -1487,6 +1936,13 @@ namespace Docx2Pdf.Ooxml
                 {
                     var val = (OoxmlUtil.Str(vMerge, Ns.W + "val") ?? "continue").ToLowerInvariant();
                     cell.VMerge = val == "restart" ? VerticalMerge.Restart : VerticalMerge.Continue;
+                }
+
+                var noWrap = tcPr.Element(Ns.W + "noWrap");
+                if (noWrap != null)
+                {
+                    var val = (OoxmlUtil.Str(noWrap, Ns.W + "val") ?? "1").ToLowerInvariant();
+                    cell.NoWrap = val != "0" && val != "false" && val != "off" && val != "none";
                 }
 
                 var borders = FormatReader.ReadBorders(tcPr.Element(Ns.W + "tcBorders"));
@@ -1537,10 +1993,49 @@ namespace Docx2Pdf.Ooxml
                 }
             }
 
-            cell.Blocks = ReadBlocks(cellEl);
+            // Region run/paragraph formatting joins the style scope so the cell's
+            // paragraphs inherit it (bold white header text) under their own overrides.
+            var regionScoped = false;
+            if (regionRun != null || regionPara != null)
+            {
+                _tableStyleScope.Add(new KeyValuePair<ParagraphFormat, CharacterFormat>(
+                    regionPara ?? new ParagraphFormat(), regionRun ?? new CharacterFormat()));
+                regionScoped = true;
+            }
+            try
+            {
+                cell.Blocks = ReadBlocks(cellEl);
+            }
+            finally
+            {
+                if (regionScoped)
+                    _tableStyleScope.RemoveAt(_tableStyleScope.Count - 1);
+            }
             if (cell.Blocks.Count == 0)
                 cell.Blocks.Add(new Paragraph { Format = _styles.DefaultParagraphFormat.Clone(), RunDefaults = _styles.DefaultCharacterFormat.Clone() });
             return cell;
+        }
+
+        /// <summary>
+        /// Conditional regions active for a cell, from the row's and cell's w:cnfStyle
+        /// bitmasks, in application order (bands, then columns, then rows — later wins).
+        /// Legacy bit order: firstRow lastRow firstCol lastCol band1Vert band2Vert
+        /// band1Horz band2Horz + four corner bits (corners rarely styled; skipped).
+        /// </summary>
+        private static IEnumerable<string> ActiveRegions(string rowCnf, string cellCnf)
+        {
+            Func<int, bool> bit = index =>
+                (rowCnf != null && rowCnf.Length > index && rowCnf[index] == '1')
+                || (cellCnf != null && cellCnf.Length > index && cellCnf[index] == '1');
+
+            if (bit(4)) yield return "band1Vert";
+            if (bit(5)) yield return "band2Vert";
+            if (bit(6)) yield return "band1Horz";
+            if (bit(7)) yield return "band2Horz";
+            if (bit(2)) yield return "firstCol";
+            if (bit(3)) yield return "lastCol";
+            if (bit(0)) yield return "firstRow";
+            if (bit(1)) yield return "lastRow";
         }
 
         // ---------------------------------------------------------------- sections

@@ -1,9 +1,9 @@
-0sample/
+.sample/
 docx2pdf/samples/Docx2Pdf.Cli/bin/
 docx2pdf/samples/Docx2Pdf.Cli/obj/
 docx2pdf/tools/Docx2Pdf.Compare/obj/
 docx2pdf/tools/Docx2Pdf.Compare/bin/
+docx2pdf/tests/Docx2Pdf.Tests/bin/
 docx2pdf/tests/Docx2Pdf.Tests/obj/
 docx2pdf/src/Docx2Pdf/bin/
 docx2pdf/src/Docx2Pdf/obj/
-docx2pdf/tests/Docx2Pdf.Tests/bin/

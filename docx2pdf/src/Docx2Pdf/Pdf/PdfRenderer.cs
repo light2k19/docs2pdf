@@ -250,7 +250,10 @@ namespace Docx2Pdf.Pdf
 
             if (line.Style == BorderStyle.Double)
             {
-                var offset = Math.Max(0.6, width);
+                // Word's thin doubles (sz 6 = 0.75pt strokes) rasterise as one merged
+                // band at screen resolution; strokes a full width apart leave a visible
+                // white gap that reads as two separate rules (sample1 Total row).
+                var offset = Math.Max(0.5, width * 0.7);
                 var horizontal = Math.Abs(line.Y1 - line.Y2) < 0.01;
                 if (horizontal)
                 {
