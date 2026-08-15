@@ -439,7 +439,7 @@ namespace Docx2Pdf.Layout
             // tighter at every after+before boundary (TOC1 after=6 meeting TOC2
             // before=6 renders 6, not 12), and sample3's Heading↔Normal boundaries
             // (all spacing from styles) collapse the same way although one side is
-            // the DEFAULT style. DIRECT spacing still ADDS (the Xu resume regressed
+            // the DEFAULT style. DIRECT spacing still ADDS (the resume regressed
             // 18 ink under an unconditional legacy collapse; its boundaries carry
             // direct pPr spacing).
             // A pageBreakBefore paragraph always opens a page — its space-before never
@@ -470,7 +470,7 @@ namespace Docx2Pdf.Layout
             // set directly in the paragraph's own pPr survives (sample1 p4 nested demo:
             // every cell keeps its direct w:before=240 — One/Two ink 18px below the row
             // top — while p3's style-spaced College rows sit at bare line height).
-            // Mode-15 documents keep it either way (MyLesen's 3pt cell-top spacers).
+            // Mode-15 documents keep it either way (the UAT doc's 3pt cell-top spacers).
             // The same drop applies to a paragraph directly AFTER a table at body level
             // (sample3: the heading below each table sits 6pt higher than styled).
             // A pageBreakBefore paragraph opens a page — its space-before follows the
@@ -583,7 +583,7 @@ namespace Docx2Pdf.Layout
                 var line = lines[i];
                 // Consecutive paragraphs with identical borders form one bordered group in
                 // Word: the top edge draws only above the first of the group and the bottom
-                // only below the last (the Xu portfolio precedes each underlined section
+                // only below the last (the portfolio precedes each underlined section
                 // heading with an empty paragraph carrying the same pBdr — one rule, not two).
                 var borderTop = previous == null || previous.Format == null
                                 || !SameBorders(format.Borders, previous.Format.Borders);

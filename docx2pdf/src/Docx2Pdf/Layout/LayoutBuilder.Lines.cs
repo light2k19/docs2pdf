@@ -187,19 +187,19 @@ namespace Docx2Pdf.Layout
                 }
 
                 // Justified space compression is a MODE-15 behaviour: Word 2013+'s engine
-                // squeezes inter-word spaces to pull a word up (SaBC, mode 15 — the 20%
+                // squeezes inter-word spaces to pull a word up (the manual, mode 15 — the 20%
                 // model was calibrated there), while the legacy engine breaks rigidly
                 // (sample-6, mode 14: line 1 + "augue" = 487.8pt in a 481.7pt column =
                 // a 15.9%-per-space squeeze Word refuses; rigid fitting took the doc
                 // 75.9 → 99.7). Left-aligned spaces are always rigid — testing without
-                // the pending space admitted an extra word on razor lines (MyLesen p10:
-                // "…Fi Pentadbiran." 200.6pt kept in a 199.3pt column).
+                // the pending space admitted an extra word on razor lines (the UAT doc p10:
+                // a 200.6pt line kept in a 199.3pt column).
                 var justified = (paragraph.Format.Alignment ?? TextAlignment.Left) == TextAlignment.Justify;
                 // LEGACY Word admits hairline overshoots — sample1 p5's drop-cap line
                 // fits at 0.28pt over our arithmetic (sub-point space advances over ten
                 // spaces) — while rejecting real ones (sample-6: 6.2pt over breaks).
-                // Mode-15 razors cut the other way (a universal 0.4 dropped SaBC 2.6,
-                // MyLesen 0.5): their fit stays at the pixel epsilon, with the
+                // Mode-15 razors cut the other way (a universal 0.4 dropped the manual 2.6,
+                // the UAT doc 0.5): their fit stays at the pixel epsilon, with the
                 // calibrated space-compression model for justified text.
                 var tolerance = _ctx.LegacyCellSpacing ? 0.4 : 0.01;
                 var basis = current.Width;
@@ -225,7 +225,7 @@ namespace Docx2Pdf.Layout
                     // The cluster glue joins the pieces of one WORD: it applies only when
                     // the overflowing atom is text. An inline image (or tab/anchor) breaks
                     // freely after text — carrying the preceding word with it shifted the
-                    // picture right and stranded "application." under it (MyLesen p14).
+                    // picture right and stranded the trailing word under it (UAT doc p14).
                     var carryFrom = atom is TextAtom ? current.Atoms.Count : 0;
                     while (carryFrom > 0)
                     {
@@ -234,8 +234,8 @@ namespace Docx2Pdf.Layout
                             break;
                         // Tokenize splits after hyphens, slashes and CJK characters — those
                         // are legitimate break points, so the cluster glue must not carry
-                        // them back together (MyLesen p5: Word ends the line at "re-" and
-                        // wraps "testing"; gluing moved the whole word and added a line).
+                        // them back together (the UAT doc p5: Word ends the line at a hyphen
+                        // and wraps the tail; gluing moved the whole word and added a line).
                         var prevText = prev as TextAtom;
                         if (prevText != null && !string.IsNullOrEmpty(prevText.Text)
                             && AllowsBreakAfter(prevText.Text[prevText.Text.Length - 1]))

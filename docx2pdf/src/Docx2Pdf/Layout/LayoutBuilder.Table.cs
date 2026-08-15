@@ -53,7 +53,7 @@ namespace Docx2Pdf.Layout
                 offset = Math.Max(0, availableWidth - tableWidth);
             }
             // Word honours the stated indent even when the table then hangs into the right
-            // margin (SaBC Features table: tblInd 607tw + grid 8886tw > 9360tw body — Word
+            // margin (the manual's feature table: tblInd 607tw + grid 8886tw > 9360tw body — Word
             // keeps the table at the indent).
 
             var tableId = new object();
@@ -180,8 +180,8 @@ namespace Docx2Pdf.Layout
             {
                 // Derive missing columns from declared cell widths, or split the remainder
                 // evenly. Rows whose cells carry no widths at all are skipped — a generated
-                // document may declare widths on its header rows only (the MPOB licence's
-                // 1008-row lot table: 1005 width-less rows, widths on the 3 header rows).
+                // document may declare widths on its header rows only (the licence form's
+                // 1008-row schedule table: 1005 width-less rows, widths on the 3 header rows).
                 var widths = new List<double>();
                 foreach (var row in table.Rows)
                 {
@@ -212,9 +212,9 @@ namespace Docx2Pdf.Layout
             }
 
             // A grid-less table auto-fits: Word grows a column past its declared width when
-            // unwrapped cell content needs it (the MPOB licence's lot table declares a
-            // 120pt Mukim column but renders ~124.5pt so "BATU API LAND DISTRICT" stays on
-            // one line). Oversized results are pulled back by the width cap below.
+            // unwrapped cell content needs it (the licence form's schedule table declares a
+            // 120pt column but renders ~124.5pt so its longest entry stays on one line).
+            // Oversized results are pulled back by the width cap below.
             if (table.Grid.Count == 0 && maxCells > 0)
             {
                 var prefs = new double[maxCells];
@@ -276,7 +276,7 @@ namespace Docx2Pdf.Layout
             // hangs into the margins); an oversized PREFERRED width is pulled back to fit —
             // but a GRID that is itself wider than the body renders verbatim: Word lets the
             // table overflow the right margin and paper edge instead of shrinking columns
-            // (MyLesen FEE03 title block: grid 25294tw on a ~14850tw landscape body — the
+            // (the UAT doc's landscape title block: grid 25294tw on a ~14850tw body — the
             // value column keeps its 538pt and the last column runs off the page).
             if (target > availableWidth + 36 && total <= availableWidth + 36)
                 target = availableWidth;
@@ -532,7 +532,7 @@ namespace Docx2Pdf.Layout
                     return null;
 
                 // A trHeight "atLeast" minimum is a per-page minimum: a split row never
-                // starts in less space than it (MyLesen p10: row 5 had 79pt free under
+                // starts in less space than it (the UAT doc p10: row 5 had 79pt free under
                 // row 4 but trHeight 135.4 — Word moves the whole row to p11 even though
                 // every cell could have placed lines). At the top of a page the row
                 // starts regardless, else a minimum taller than the page would never place.
@@ -575,7 +575,7 @@ namespace Docx2Pdf.Layout
                         // never empty. The epsilon absorbs float noise between the natural
                         // height computed at construction and the available height derived
                         // back from it — without it a row whose content exactly fills it can
-                        // silently drop its last line (Xu portfolio p10, "Shanghai University").
+                        // silently drop its last line (the portfolio p10, last row).
                         if (!unbounded && height + fragment.Height > available + 0.001 && !(list.Count == 0 && forceProgress))
                             break;
                         list.Add(fragment);
@@ -608,7 +608,7 @@ namespace Docx2Pdf.Layout
                     // split exactly as at a page break, and w:widowControl val="0" turns it
                     // off (PROBE10 N-variants):
                     //  - widow: the remainder of a split paragraph is never a lone last
-                    //    line — a second line moves with it (SaBC p6 splits 2/2, not 3/1);
+                    //    line — a second line moves with it (the manual p6 splits 2/2, not 3/1);
                     //  - orphan: a lone first line never stays at the bottom of a slice —
                     //    it moves to the next slice together with its space-before.
                     if (!unbounded && plan.Position < plan.Fragments.Count && list.Count > 0)
@@ -638,7 +638,7 @@ namespace Docx2Pdf.Layout
                                 {
                                     // Too short to split two/two: pulling one line back would
                                     // orphan the first, so the WHOLE paragraph moves — Word's
-                                    // classic rule for three-line paragraphs (MyLesen p9:
+                                    // classic rule for three-line paragraphs (the UAT doc p9:
                                     // item d lands complete at the top of p10).
                                     pull = last.LineIndex + 1;
                                     while (pull < list.Count
@@ -730,7 +730,7 @@ namespace Docx2Pdf.Layout
                     else
                     {
                         // trHeight "atLeast" pads EVERY slice of a split row, not just the
-                        // whole row: Word's MyLesen p10 remainder measures exactly trHeight
+                        // whole row: Word's UAT doc p10 remainder measures exactly trHeight
                         // 237.8 + bottom border for 225.5pt of content — the slice keeps the
                         // row minimum on each page it appears, capped at the space offered.
                         rowHeight = Math.Max(rowHeight, Math.Min(minHeight, maxHeight));
@@ -804,7 +804,7 @@ namespace Docx2Pdf.Layout
         /// <summary>
         /// Content wider than its cell is clipped at the cell's right border: Word cuts an
         /// oversized inline picture there instead of painting over the neighbouring column
-        /// (MyLesen p39: the licence-table screenshot ends exactly at the Description cell
+        /// (the UAT doc p39: an oversized screenshot ends exactly at the neighbouring cell
         /// edge). Pictures clip via their source crop; frame lines and rects are clamped.
         /// Floating (anchored) content legitimately escapes the cell and is left alone.
         /// </summary>
@@ -881,7 +881,7 @@ namespace Docx2Pdf.Layout
                 if (top != null && top.IsVisible && (isFirstPart || isFirstRow))
                     fragment.Add(HorizontalLine(plan.X, plan.X + plan.Width, topBorderPt / 2, top));
                 // The bottom edge is also drawn when the row continues on the next page:
-                // Word closes a cut slice with the row's bottom border (PROBE10, SaBC p6).
+                // Word closes a cut slice with the row's bottom border (PROBE10, manual p6).
                 if (bottom != null && bottom.IsVisible)
                     fragment.Add(HorizontalLine(plan.X, plan.X + plan.Width, rowHeight - bottomBorderPt / 2, bottom));
                 if (left != null && left.IsVisible)

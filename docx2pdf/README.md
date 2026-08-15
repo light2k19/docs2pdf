@@ -182,7 +182,7 @@ When Word automation is unavailable, screenshots of the Word pages work just as 
 next to the script as `01.png`, `02.png`, ... and run:
 
 ```powershell
-.\.sample\test-docx2pdf.ps1 -Screenshots showlicenseindocx
+.\.sample\test-docx2pdf.ps1 -Screenshots mydocument
 ```
 
 Each screenshot is aligned with our page on the page border rectangle, then every text line is

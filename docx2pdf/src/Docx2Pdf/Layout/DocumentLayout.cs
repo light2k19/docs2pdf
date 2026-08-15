@@ -251,7 +251,7 @@ namespace Docx2Pdf.Layout
                         NewPage(false);
                         // The chain reaches the new page by natural flow, so a leading
                         // space-before dissolves at the page top exactly as in direct flow
-                        // (MyLesen p6: the keepNext-moved section-2 heading starts at the
+                        // (the UAT doc p6: the keepNext-moved section-2 heading starts at the
                         // content top in Word, not 12pt down).
                         if (fragment.IsSpacing && fragment.IsSpaceBefore && !_keepTopSpacing)
                             continue;
@@ -769,7 +769,7 @@ namespace Docx2Pdf.Layout
                 // Row heights include their border widths. Word counts those in the space a
                 // HEADER occupies (PROBE13, COM: body top 87.5pt = header content + 1pt of
                 // borders), but the FOOTER anchors at the page bottom and its borders overlap
-                // the body area — Word still fits a line there (SaBC p26: the embedded-map
+                // the body area — Word still fits a line there (the manual p26: the embedded
                 // image lands 0.45pt above the border-free footer limit).
                 height += fragment.Height - (isHeader ? 0 : fragment.EdgeExtentPt);
                 if (Environment.GetEnvironmentVariable("DOCX2PDF_DEBUG_HF") != null)

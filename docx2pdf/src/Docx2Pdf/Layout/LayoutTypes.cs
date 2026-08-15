@@ -214,7 +214,7 @@ namespace Docx2Pdf.Layout
         /// Horizontal border widths included in this row fragment's height. Word counts
         /// them in a header's occupied height but not in a footer's — the footer anchors
         /// at the page bottom and its top border overlaps the body area (PROBE13/14 via
-        /// COM; SaBC p26: the embedded map fits right under the border-free footer limit).
+        /// COM; the manual p26: an embedded image fits right under the border-free footer limit).
         /// </summary>
         public double EdgeExtentPt;
 

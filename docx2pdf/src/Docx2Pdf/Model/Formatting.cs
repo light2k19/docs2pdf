@@ -205,7 +205,7 @@ namespace Docx2Pdf.Model
             if (other.Tabs != null && other.Tabs.Count > 0)
             {
                 // A cleared stop removes the inherited stop at that position; the clear
-                // entry itself is not a stop (the MPOB licence footer clears the Footer
+                // entry itself is not a stop (the licence form's footer clears the Footer
                 // style's centre/right stops before adding its own page-number tab).
                 var list = Tabs == null ? new List<TabStop>() : new List<TabStop>(Tabs);
                 foreach (var stop in other.Tabs)

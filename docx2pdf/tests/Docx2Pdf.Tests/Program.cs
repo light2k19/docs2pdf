@@ -281,9 +281,7 @@ namespace Docx2Pdf.Tests
 
         private static void NumberingProducesLabels()
         {
-            var sample = Path.Combine(_sampleDirectory, "SaBC TK User Manual Contributor v0.1.docx");
-            if (!File.Exists(sample))
-                sample = FirstSample();
+            var sample = FirstSample();
 
             var warnings = new List<string>();
             using (var stream = new FileStream(sample, FileMode.Open, FileAccess.Read))

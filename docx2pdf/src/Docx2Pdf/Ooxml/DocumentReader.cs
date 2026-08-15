@@ -116,7 +116,7 @@ namespace Docx2Pdf.Ooxml
                     // In LEGACY documents an EMPTY paragraph that only carries the
                     // section break takes no vertical space in Word (sample3: the
                     // 2-column section follows its heading directly, no phantom line).
-                    // Mode-15 documents keep the line (MyLesen's 20 section ends are
+                    // Mode-15 documents keep the line (the UAT doc's 20 section ends are
                     // laid out with it — skipping them cost a page of drift).
                     if (paragraph != null && !(_legacyMode && sectPr != null && paragraph.Inlines.Count == 0))
                         section.Blocks.Add(paragraph);
@@ -314,7 +314,7 @@ namespace Docx2Pdf.Ooxml
             // is set (Word 2010+ writes val=1). sample1 (no compat settings): cell text
             // measures 11pt/docDefaults although Normal declares sz 24 — while Normal's
             // FONT (Ubuntu) and first-line indent are visibly applied in the same cells.
-            // Xu (mode 14) and SaBC (mode 15) carry val=1: Normal applies fully there.
+            // The resume (mode 14) and the manual (mode 15) carry val=1: Normal applies fully.
             var stylePara = _styles.ParagraphFormatFor(p.StyleId);
             var styleRun = _styles.CharacterFormatFor(p.StyleId);
             var isDefaultParagraphStyle = string.Equals(p.StyleId, _styles.DefaultParagraphStyleId,
@@ -902,8 +902,8 @@ namespace Docx2Pdf.Ooxml
             // A wordprocessingGroup (a screenshot with annotation shapes in a nested
             // coordinate space) must be handled before the text-box path below: the
             // group's first descendant text box is usually an empty annotation label,
-            // and taking it swallowed the whole picture (MyLesen p51: the receipt
-            // screenshot vanished and the next script's title block slid up a page).
+            // and taking it swallowed the whole picture (the UAT doc p51: the screenshot
+            // vanished and the next section's title block slid up a page).
             var group = anchor.Descendants(Ns.Wpg + "wgp").FirstOrDefault();
             if (group != null)
             {
@@ -975,8 +975,8 @@ namespace Docx2Pdf.Ooxml
         /// <summary>
         /// Renders a wpg:wgp group: the (largest) picture plus simple rectangle shapes
         /// drawn over it. Children live in the group's chOff/chExt coordinate space and
-        /// map through nested group transforms onto the drawing's extent (MyLesen p51:
-        /// a 193x169pt receipt screenshot with a red highlight rectangle).
+        /// map through nested group transforms onto the drawing's extent (the UAT doc p51:
+        /// a 193x169pt screenshot with a red highlight rectangle).
         /// </summary>
         private void ReadGroupShape(XElement group, Paragraph p, CharacterFormat format,
                                     double widthPt, double heightPt, string description)
@@ -1187,7 +1187,7 @@ namespace Docx2Pdf.Ooxml
             {
                 frame.Blocks = ReadBlocks(textBox);
                 // Text boxes lay their content out inside internal insets (a:bodyPr,
-                // Word defaults 7.2pt sides / 3.6pt top+bottom — the MPOB licence QR
+                // Word defaults 7.2pt sides / 3.6pt top+bottom — the licence form's QR
                 // sits one tIns lower than a naive box-origin layout).
                 frame.IsTextBox = true;
                 var bodyPr = anchor.Descendants(Ns.A + "bodyPr").FirstOrDefault();
@@ -1824,8 +1824,8 @@ namespace Docx2Pdf.Ooxml
                     position.ColumnCursor += Math.Max(1, cell.GridSpan);
 
                 // Legacy horizontal merge (w:hMerge): a continued cell folds into the cell
-                // it continues, widening that cell's span — the MPOB licence uses this for
-                // its full-width "NAMA LADANG" rows.
+                // it continues, widening that cell's span — the licence form uses this for
+                // its full-width label rows.
                 var tcPr = cellEl.Element(Ns.W + "tcPr");
                 var hMerge = tcPr == null ? null : tcPr.Element(Ns.W + "hMerge");
                 if (hMerge != null)
